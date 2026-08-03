@@ -1,0 +1,1156 @@
+#!/usr/bin/env python3
+"""dipstick -- how much is left on your AI coding subscriptions, and which one is main.
+
+Reads the quota your Claude Code / Codex / Antigravity subscriptions have left,
+says when each one recovers, and remembers which one you picked as main so your
+launch command can ask for it. It reports and remembers; it never launches
+anything or decides for you.
+
+Nothing here sends a prompt to a model. A probe turn would open a fresh
+rate-limit window -- the opposite of what a gauge should do -- so every source is
+a passive read or a metering endpoint that costs no quota.
+  Codex   payload.rate_limits inside session rollout files (cached by inode)
+  Claude  GET /api/oauth/usage, the endpoint the CLI itself uses. Reads the OAuth
+          token from the login keychain, so the first run raises a macOS prompt.
+  agy     RetrieveUserQuotaSummary on a running agy's local language server
+  live    CODEX_HOME of running codex processes
+
+Usage
+  dipstick                    text report
+  dipstick --json             machine-readable snapshot (menu bar app reads this)
+  dipstick --html [PATH]      write a self-contained page, no server needed
+  dipstick --serve [PORT]     local web UI, click to set main (127.0.0.1:8787)
+  dipstick --set-main KEY     one of the keys printed by --json, or "auto"
+  dipstick --main-cmd         print the launch prefix for the current main
+  dipstick --lang ko|en       display language (the web UI has a switch too)
+
+Config (all optional) -- ~/.config/dipstick/config.json
+  {"reserve": {"Claude": 20},          # keep this % for the subscription's own use
+   "policy":  {"Codex ProLite": ["1st", "default lane"]},
+   "imminent_minutes": 60}
+"""
+import base64
+import collections
+import datetime
+import glob
+import html as htmllib
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+# Codex keeps one home per account. Orca (and similar wrappers) give each managed
+# account its own; a plain install has just ~/.codex. Both are scanned.
+CODEX_HOME_GLOBS = [
+    "~/Library/Application Support/orca/codex-accounts/*/home",
+    "~/.codex",
+]
+CONFIG_PATH = os.path.expanduser("~/.config/dipstick/config.json")
+GOOGLE_ACCOUNTS = os.path.expanduser("~/.gemini/google_accounts.json")
+CLAUDE_KEYCHAIN = "Claude Code-credentials"
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+AGY_RPC = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+DB_PATH = os.path.expanduser(os.environ.get("DIPSTICK_DB",
+                             "~/.local/share/dipstick/dipstick.db"))
+
+STALE_HOURS = 6.0
+# (floor, tag, colour) -- highest floor that fits wins. Colour is the whole point
+# of the page: a pool at 34% must not read the same as one at 100%.
+TIERS = [(60.0, "GO", "#2e7d4f"), (30.0, "TIGHT", "#b8860b"),
+         (0.01, "LOW", "#d1622b"), (-1.0, "BLOCKED", "#b3382f")]
+
+# Percentage a subscription keeps for its own use. If you also chat with Claude in
+# the same plan your agents run on, a floor stops background lanes from eating the
+# conversation you are having. Blocks by default; naming that subscription as main
+# is an explicit override that burns through it anyway, and says so.
+# Configure via {"reserve": {"Claude": 20}}.
+RESERVE = {}
+
+# A window resetting within the hour does not constrain work you start now; one
+# resetting in five days does. So what binds is time-to-recovery, not the raw
+# percentage -- 30% on a 5-hour window and 30% on a 7-day window are different
+# problems. Windows this close to resetting are labelled and stop driving the
+# headline, the ordering and the card verdict.
+IMMINENT_MIN = 60.0
+
+
+def load_config():
+    """User config overrides the empty defaults above. Absent file is fine."""
+    global RESERVE, POLICY, IMMINENT_MIN
+    try:
+        cfg = json.load(open(CONFIG_PATH))
+    except (OSError, ValueError):
+        return
+    RESERVE = {k: float(v) for k, v in (cfg.get("reserve") or {}).items()}
+    POLICY = {k: (v[0], v[1]) for k, v in (cfg.get("policy") or {}).items()
+              if isinstance(v, (list, tuple)) and len(v) == 2}
+    IMMINENT_MIN = float(cfg.get("imminent_minutes", IMMINENT_MIN))
+
+
+def sub_key(sub):
+    """Stable slug for a subscription label, used by --set-main and the web form."""
+    return re.sub(r"[^a-z0-9]+", "-", sub.lower()).strip("-")
+
+# Your own note per subscription, shown on its card: {"Codex Pro": ["2nd", "when
+# ProLite runs short"]}. Whatever order you work by is yours to write down; this
+# tool only displays it. Configure via {"policy": {...}}.
+POLICY = {}
+
+LANG = "ko"          # set from the stored setting / --lang; "ko" or "en"
+
+
+def L(ko, en):
+    """Every user-facing string goes through here.
+
+    The page used to mix languages because agy's API hands back English labels
+    ("Weekly Limit") while the Codex and Claude labels were built in Korean. Both
+    now come from the same table, so a page is one language, never half of each.
+    """
+    return ko if LANG == "ko" else en
+
+
+def window_label(minutes):
+    if minutes % 10080 == 0 and minutes >= 10080:
+        n = minutes // 10080
+        return L(f"{n}주 창" if n > 1 else "7일 창",
+                 f"{n}-week window" if n > 1 else "7-day window")
+    if minutes % 1440 == 0:
+        n = minutes // 1440
+        return L(f"{n}일 창", f"{n}-day window")
+    return L(f"{minutes // 60}시간 창", f"{minutes // 60}-hour window")
+
+
+AGY_WINDOW = {"weekly": lambda: L("7일 창", "7-day window"),
+              "5h": lambda: L("5시간 창", "5-hour window"),
+              "daily": lambda: L("1일 창", "1-day window")}
+AGY_GROUP = {"Gemini Models": lambda: L("Gemini 계열", "Gemini models"),
+             "Claude and GPT models": lambda: L("Claude·GPT 계열", "Claude and GPT models")}
+
+now = datetime.datetime.now()
+
+
+def hours_until(dt):
+    return (dt - now).total_seconds() / 3600
+
+
+WEEKDAY = "월화수목금토일"
+
+
+def fmt_left(secs):
+    """Spoken duration -- '3시간 3분 후', never a bare decimal like '3.1h'."""
+    if secs < 0:
+        return L("지남 · 갱신 대기", "past · awaiting refresh")
+    mins = int(secs // 60)
+    if mins < 1:
+        return L("곧", "any moment")
+    if mins < 60:
+        return L(f"{mins}분 후", f"in {mins}m")
+    h, m = divmod(mins, 60)
+    if h < 24:
+        return L(f"{h}시간 {m}분 후" if m else f"{h}시간 후",
+                 f"in {h}h {m}m" if m else f"in {h}h")
+    d, h = divmod(h, 24)
+    return L(f"{d}일 {h}시간 후" if h else f"{d}일 후",
+             f"in {d}d {h}h" if h else f"in {d}d")
+
+
+def fmt_reset(dt):
+    """(when, left) -- '오늘 19:00', '3시간 6분 후'.
+
+    The reset clock is half of every decision here, so it gets a calendar-relative
+    day and a spoken duration instead of a bare decimal like '3.1h'.
+    """
+    days = (dt.date() - now.date()).days
+    if LANG == "ko":
+        day = ("오늘" if days == 0 else "내일" if days == 1 else "모레" if days == 2
+               else f"{dt:%m-%d}({WEEKDAY[dt.weekday()]})")
+    else:
+        day = ("today" if days == 0 else "tomorrow" if days == 1
+               else f"{dt:%b %d (%a)}")
+    when = f"{day} {dt:%H:%M}"
+
+    return when, fmt_left((dt - now).total_seconds())
+
+
+def tier(remaining_pct):
+    for floor, tag, colour in TIERS:
+        if remaining_pct >= floor:
+            return tag, colour
+    return "BLOCKED", "#b3382f"
+
+
+def verdict(remaining_pct, hours_left, stale_hours=0.0, live=0, imminent=False):
+    left = fmt_left(hours_left * 3600)
+    if remaining_pct is None:
+        return "UNKNOWN", L("관측값 없음 — 수동 확인", "no reading — check manually")
+    if stale_hours > STALE_HOURS:
+        return "STALE", L(f"마지막 관측 {stale_hours:.0f}h 전 — 실제 잔량은 더 낮을 수 있음",
+                          f"last seen {stale_hours:.0f}h ago — the real figure may be lower")
+    tag, _ = tier(remaining_pct)
+    busy = L(f" · 같은 풀에 실행 중 {live}개", f" · {live} running on this pool") if live else ""
+    if imminent and tag != "GO":
+        return tag, L(f"회복 임박 — {left} 풀린다. 지금 시작할 작업엔 제약 아님{busy}",
+                      f"recovers {left} — not a constraint for work you start now{busy}")
+    if tag == "BLOCKED":
+        return tag, L(f"소진 — {left} 회복", f"exhausted — recovers {left}")
+    if tag == "LOW":
+        return tag, L(f"{left} 회복까지 신규 작업 보류{busy}",
+                      f"hold new work until it recovers {left}{busy}")
+    if tag == "TIGHT":
+        return tag, L(f"짧은 작업만 — 긴 작업은 {left} 회복 이후로{busy}",
+                      f"short work only — leave long work until it recovers {left}{busy}")
+    return tag, L(f"여유{busy}", f"headroom{busy}")
+
+
+def is_imminent(resets):
+    if not resets:
+        return False
+    return 0 <= (resets - now).total_seconds() / 60 <= IMMINENT_MIN
+
+
+def binding_windows(windows):
+    """The windows that actually constrain a new lane.
+
+    Falls back to everything when every window is about to reset, so a card is
+    never summarised from an empty set.
+    """
+    lasting = [w for w in windows if not is_imminent(w.get("resets"))]
+    return lasting or windows
+
+
+def binding_window(windows):
+    """The single window a card's verdict comes from, or None.
+
+    Labelling it is the point: without it the weighting is invisible and a reader
+    still assumes the smallest number is the problem.
+    """
+    wins = binding_windows(windows)
+    return min(wins, key=lambda w: w["remaining"]) if wins else None
+
+
+def binding_score(windows):
+    wins = binding_windows(windows)
+    return min((w["remaining"] for w in wins), default=101.0)
+
+
+def policy_of(sub):
+    return next((v for k, v in POLICY.items() if sub.startswith(k)), None)
+
+
+def reserve_floor(sub):
+    return next((v for k, v in RESERVE.items() if sub.startswith(k)), None)
+
+
+def reserve_state(sub, windows, is_main=False):
+    floor = reserve_floor(sub)
+    if floor is None:
+        return None
+    vals = [w["remaining"] for w in windows]
+    if not vals:
+        return "UNKNOWN", L(f"관측값 없음 — 하한 {floor:.0f}% 확인 불가",
+                            f"no reading — cannot check the {floor:.0f}% floor")
+    low = min(vals)
+    if low < floor:
+        worst = min(windows, key=lambda w: w["remaining"])
+        left = fmt_left((worst["resets"] - now).total_seconds()) if worst.get("resets") else ""
+        soon = (L(f" · {left} 회복", f" · recovers {left}")
+                if is_imminent(worst.get("resets")) else "")
+        if is_main:
+            return "LOW", L(f"잔량 {low:.0f}% < 예비 {floor:.0f}% — 메인 지정으로 태우는 중. "
+                            f"이 구독을 직접 쓰는 작업이 먼저 끊길 수 있다{soon}",
+                            f"{low:.0f}% left, below the {floor:.0f}% reserve — burning it by "
+                            f"explicit choice. Your own use of this plan may stop first{soon}")
+        return "BLOCKED", L(f"잔량 {low:.0f}% < 예비 {floor:.0f}% — 사용 보류. "
+                            f"태우려면 메인으로 지정한다{soon}",
+                            f"{low:.0f}% left, below the {floor:.0f}% reserve — on hold. "
+                            f"Set it as main to burn through{soon}")
+    when = (L("메인 지정됨 — 지금 배정 가능", "set as main — assignable now") if is_main
+            else L("마감 임박 시 배정 가능", "assignable under deadline pressure"))
+    return "GO", L(f"하한 {floor:.0f}%까지 여유 {low - floor:.0f}%p — {when}",
+                   f"{low - floor:.0f}%p above the {floor:.0f}% floor — {when}")
+
+
+PLAN_TITLE = {"pro": "Pro", "prolite": "ProLite", "plus": "Plus", "free": "Free",
+              "max": "Max", "team": "Team"}
+
+
+def sub_label(vendor, plan):
+    return f"{vendor} {PLAN_TITLE.get((plan or '').lower(), plan or '?')}"
+
+
+# ------------------------------------------------------------------- store
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS scanned(
+  ino INTEGER PRIMARY KEY, mtime REAL NOT NULL, ts TEXT, plan TEXT, payload TEXT);
+CREATE TABLE IF NOT EXISTS samples(
+  taken_at TEXT NOT NULL, sub TEXT NOT NULL, window TEXT NOT NULL,
+  remaining REAL NOT NULL, resets_at TEXT);
+CREATE INDEX IF NOT EXISTS samples_sub_time ON samples(sub, taken_at);
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS apicache(key TEXT PRIMARY KEY, fetched_at REAL NOT NULL, body TEXT);
+"""
+
+# The Claude usage endpoint rate-limits polling -- calling it once per run (let
+# alone once per page refresh) earns a 429. Serve the cached body inside the TTL,
+# and on any failure fall back to the last good one rather than losing the number.
+CLAUDE_TTL = 300.0   # measured: this endpoint 429s well before a per-run poll
+
+
+def connect():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    db = sqlite3.connect(DB_PATH, timeout=10)
+    db.executescript(SCHEMA)
+    return db
+
+
+def get_setting(db, key, default=""):
+    row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(db, key, value):
+    db.execute("INSERT INTO settings(key,value) VALUES(?,?) "
+               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+    db.commit()
+
+
+def cache_get(db, key, ttl=None):
+    """(body, age_seconds) or (None, None). ttl=None returns it at any age."""
+    row = db.execute("SELECT fetched_at, body FROM apicache WHERE key=?", (key,)).fetchone()
+    if not row:
+        return None, None
+    age = time.time() - row[0]
+    if ttl is not None and age > ttl:
+        return None, age
+    try:
+        return json.loads(row[1]), age
+    except ValueError:
+        return None, age
+
+
+def cache_put(db, key, body):
+    db.execute("INSERT INTO apicache(key,fetched_at,body) VALUES(?,?,?) "
+               "ON CONFLICT(key) DO UPDATE SET fetched_at=excluded.fetched_at, "
+               "body=excluded.body", (key, time.time(), json.dumps(body)))
+    db.commit()
+
+
+def record_samples(db, rows):
+    db.executemany(
+        "INSERT INTO samples(taken_at,sub,window,remaining,resets_at) VALUES(?,?,?,?,?)",
+        [(now.isoformat(timespec="seconds"), r["sub"], w["name"], w["remaining"],
+          w["resets"].isoformat() if w.get("resets") else None)
+         for r in rows for w in r["windows"]])
+    db.execute("DELETE FROM scanned WHERE mtime < ?", (time.time() - 30 * 86400,))
+    db.execute("DELETE FROM samples WHERE taken_at < datetime('now','-30 days')")
+    db.commit()
+
+
+MIN_SPAN_H = 1.0    # below this the divisor is noise and the rate is meaningless
+
+
+def burn_rate(db, sub, window, hours=48):
+    """%p consumed per hour, or None until the samples span MIN_SPAN_H.
+
+    A rise means the window reset, which is not consumption, so only falls count.
+    """
+    rows = db.execute(
+        "SELECT taken_at, remaining FROM samples WHERE sub=? AND window=? "
+        "AND taken_at >= datetime('now', ?) ORDER BY taken_at",
+        (sub, window, f"-{hours} hours")).fetchall()
+    spent = elapsed = 0.0
+    for (t0, v0), (t1, v1) in zip(rows, rows[1:]):
+        if v1 > v0:
+            continue
+        dt = (datetime.datetime.fromisoformat(t1)
+              - datetime.datetime.fromisoformat(t0)).total_seconds() / 3600
+        if dt > 0:
+            spent += v0 - v1
+            elapsed += dt
+    return spent / elapsed if elapsed >= MIN_SPAN_H else None
+
+
+# -------------------------------------------------------------- collectors
+
+def codex_homes():
+    return [d for pat in CODEX_HOME_GLOBS
+            for d in sorted(glob.glob(os.path.expanduser(pat))) if os.path.isdir(d)]
+
+
+def _codex_claims():
+    """[(home_dir, claims)] for every codex account found on this machine."""
+    out = []
+    for auth in [os.path.join(h, "auth.json") for h in codex_homes()]:
+        try:
+            tok = json.load(open(auth))["tokens"]["id_token"]
+            body = tok.split(".")[1]
+            out.append((os.path.dirname(auth),
+                        json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))))
+        except Exception:
+            continue
+    return out
+
+
+def codex_plan_to_email():
+    """{plan_type: email}.
+
+    Wrappers that manage several accounts may hardlink the session dir across
+    homes, so the rollout stream interleaves every account and plan_type is the
+    only separator. Two accounts on the same plan would collide.
+    """
+    out = {}
+    for _, c in _codex_claims():
+        plan = (c.get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type")
+        if plan:
+            out[plan] = c.get("email", "?")
+    return out
+
+
+def codex_home_for(plan):
+    for home, c in _codex_claims():
+        if (c.get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type") == plan:
+            return home
+    return None
+
+
+def _extract_rate_limits(path):
+    """(ts, plan, payload) of the newest account-wide record in one rollout file.
+
+    limit_id "codex" is the account limit. Other ids are per-model buckets
+    (codex_bengalfox = GPT-5.3-Codex-Spark) which the desktop app also writes here;
+    keying on plan_type alone turns those into phantom accounts.
+    """
+    try:
+        lines = open(path, encoding="utf-8", errors="ignore").read().splitlines()
+    except OSError:
+        return None, None, None
+    for line in reversed(lines):
+        if '"rate_limits"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        rl = (d.get("payload") or {}).get("rate_limits")
+        if rl and d.get("timestamp") and rl.get("limit_id") == "codex":
+            return d["timestamp"], rl.get("plan_type"), rl
+    return None, None, None
+
+
+def codex_rows(db, live_total):
+    emails = codex_plan_to_email()
+    cutoff = now - datetime.timedelta(days=14)
+    cache = {ino: (mtime, ts, plan, payload) for ino, mtime, ts, plan, payload
+             in db.execute("SELECT ino,mtime,ts,plan,payload FROM scanned")}
+
+    fresh, best = [], {}
+    for home in codex_homes():
+        for f in glob.glob(os.path.join(home, "sessions", "*", "*", "*", "*.jsonl")):
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            if datetime.datetime.fromtimestamp(st.st_mtime) < cutoff:
+                continue
+            hit = cache.get(st.st_ino)          # hardlinked across homes; ino dedupes
+            if hit and abs(hit[0] - st.st_mtime) < 1e-6:
+                ts, plan, payload = hit[1], hit[2], hit[3]
+                rl = json.loads(payload) if payload else None
+            else:
+                ts, plan, rl = _extract_rate_limits(f)
+                fresh.append((st.st_ino, st.st_mtime, ts, plan,
+                              json.dumps(rl) if rl else None))
+            if rl and ts and (plan not in best or ts > best[plan][0]):
+                best[plan] = (ts, rl)
+    if fresh:
+        db.executemany(
+            "INSERT INTO scanned(ino,mtime,ts,plan,payload) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(ino) DO UPDATE SET mtime=excluded.mtime, ts=excluded.ts, "
+            "plan=excluded.plan, payload=excluded.payload", fresh)
+        db.commit()
+
+    rows = []
+    for plan, (ts, rl) in sorted(best.items(), key=lambda kv: str(kv[0])):
+        obs = datetime.datetime.fromisoformat(
+            ts.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+        stale = (now - obs).total_seconds() / 3600
+        wins = []
+        for key in ("primary", "secondary"):
+            w = rl.get(key)
+            if not w or w.get("used_percent") is None:
+                continue
+            remaining = 100 - float(w["used_percent"])
+            resets = datetime.datetime.fromtimestamp(w["resets_at"]) if w.get("resets_at") else None
+            wins.append({"name": window_label(w["window_minutes"]), "remaining": remaining,
+                         "resets": resets,
+                         "verdict": verdict(remaining, hours_until(resets) if resets else 0,
+                                            stale, live_total, is_imminent(resets))})
+        rows.append({"sub": sub_label("Codex", plan), "account": emails.get(plan, "계정 미상"),
+                     "pool": None, "windows": wins,
+                     "note": L(f"관측 {obs:%m-%d %H:%M} ({stale:.0f}h 전)", f"seen {obs:%m-%d %H:%M} ({stale:.0f}h ago)")})
+    for plan in sorted(set(emails) - set(best)):
+        rows.append({"sub": sub_label("Codex", plan), "account": emails[plan], "pool": None,
+                     "windows": [], "note": L("이 구독으로 아직 실행한 적 없어 관측값 없음", "no reading yet — nothing has run on this subscription")})
+    return rows
+
+
+def claude_account():
+    try:
+        out = subprocess.run(["claude", "auth", "status", "--json"],
+                             capture_output=True, text=True, timeout=25).stdout
+        return json.loads(out).get("email") or "계정 미상"
+    except Exception:
+        return "계정 미상"
+
+
+def claude_rows(db):
+    base = {"account": claude_account(), "sub": "Claude", "pool": None, "windows": []}
+    try:
+        raw = subprocess.run(["security", "find-generic-password", "-w", "-s", CLAUDE_KEYCHAIN,
+                              "-a", os.environ.get("USER", "")],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return [dict(base, note="keychain 읽기 실패 (접근 승인 필요)")]
+    if raw.returncode != 0 or not raw.stdout.strip():
+        return [dict(base, note="keychain 항목 없음 또는 접근 거부")]
+    try:
+        oauth = json.loads(raw.stdout)["claudeAiOauth"]
+    except (ValueError, KeyError):
+        return [dict(base, note="credential 형식이 예상과 다름")]
+
+    base["sub"] = sub_label("Claude", oauth.get("subscriptionType"))
+    if oauth.get("expiresAt", 0) / 1000 < now.timestamp():
+        return [dict(base, note="access token 만료 — 아무 claude 명령이나 한 번 실행하면 갱신됨")]
+    note = ""
+    body, age = cache_get(db, "claude_usage", CLAUDE_TTL)
+    if body is None:
+        req = urllib.request.Request(CLAUDE_USAGE_URL, headers={
+            "Authorization": f"Bearer {oauth['accessToken']}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": "claude-cli (quota gauge)"})
+        try:
+            with urllib.request.urlopen(req, timeout=25) as r:
+                body = json.load(r)
+            cache_put(db, "claude_usage", body)
+        except Exception as e:
+            body, age = cache_get(db, "claude_usage")     # stale beats nothing
+            reason = (f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError)
+                      else type(e).__name__)
+            if body is None:
+                hint = ("조회 한도 — 잠시 후 재시도" if getattr(e, "code", None) == 429
+                        else "토큰 만료면 claude 재실행, 아니면 endpoint 변경 의심")
+                return [dict(base, note=f"{reason} — {hint}")]
+            note = f"{reason} — 마지막 성공값 사용 ({age / 60:.0f}분 전)"
+    elif age and age > 5:
+        note = L(f"캐시 {age:.0f}초 전 (엔드포인트 폴링 한도 회피)", f"cached {age:.0f}s ago (endpoint rate-limits polling)")
+
+    wins = []
+    for key, mins in (("five_hour", 300), ("seven_day", 10080)):
+        w = body.get(key)
+        if not w or w.get("utilization") is None:
+            continue
+        remaining = 100 - float(w["utilization"])
+        resets = datetime.datetime.fromisoformat(w["resets_at"]).astimezone().replace(tzinfo=None)
+        wins.append({"name": window_label(mins), "remaining": remaining, "resets": resets,
+                     "verdict": verdict(remaining, hours_until(resets),
+                                        imminent=is_imminent(resets))})
+    return [dict(base, windows=wins, note=note)]
+
+
+def agy_rows():
+    """agy holds quota in memory and serves it on a per-process local port."""
+    try:
+        acct = json.load(open(GOOGLE_ACCOUNTS)).get("active") or "계정 미상"
+    except Exception:
+        acct = "계정 미상"
+    base = {"account": acct, "sub": "Antigravity", "pool": None, "windows": []}
+    try:
+        out = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return [dict(base, note="포트 탐색 실패")]
+    ports = [int(m.group(1)) for line in out.splitlines() if line.split()[:1] == ["agy"]
+             for m in [re.search(r"127\.0\.0\.1:(\d+)", line)] if m]
+    if not ports:
+        return [dict(base, note=L("실행 중인 agy 없음 — 하나 띄우면 조회됨", "no agy running — start one and it reads"))]
+
+    body = None
+    for p in sorted(ports, reverse=True):
+        req = urllib.request.Request(f"http://127.0.0.1:{p}{AGY_RPC}", data=b"{}",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=6) as r:
+                body = json.load(r)
+            break
+        except Exception:
+            continue
+    if not body:
+        return [dict(base, note="로컬 RPC 응답 없음")]
+
+    rows = []
+    for g in body.get("response", {}).get("groups", []):
+        wins = []
+        for b in g.get("buckets", []):
+            frac = b.get("remainingFraction")
+            if frac is None:
+                continue
+            remaining = float(frac) * 100
+            resets = (datetime.datetime.fromisoformat(b["resetTime"].replace("Z", "+00:00"))
+                      .astimezone().replace(tzinfo=None)) if b.get("resetTime") else None
+            label = AGY_WINDOW.get(b.get("window"))
+            wins.append({"name": label() if label else b.get("displayName", "?"),
+                         "remaining": remaining, "resets": resets,
+                         "verdict": verdict(remaining, hours_until(resets) if resets else 0,
+                                            imminent=is_imminent(resets))})
+        gname = AGY_GROUP.get(g.get("displayName"))
+        rows.append(dict(base, pool=gname() if gname else g.get("displayName"),
+                         windows=wins, note=""))
+    return rows
+
+
+def live_codex():
+    counts = collections.Counter()
+    try:
+        pids = subprocess.run(["pgrep", "-x", "codex"], capture_output=True, text=True).stdout.split()
+    except OSError:
+        return counts
+    for pid in pids:
+        env = subprocess.run(["ps", "eww", "-o", "command=", "-p", pid],
+                             capture_output=True, text=True).stdout
+        m = re.search(r"CODEX_HOME=(\S+(?: \S+)*?)(?= [A-Z_]+=|$)", env)
+        counts[m.group(1) if m else "(unset → ~/.codex)"] += 1
+    return counts
+
+
+def collect(db):
+    consumers = live_codex()
+    rows = codex_rows(db, sum(consumers.values())) + claude_rows(db) + agy_rows()
+    record_samples(db, rows)
+    return rows, consumers
+
+
+def group_by_subscription(rows, main=""):
+    """[(sub, account, [row,...]), ...] -- one quota pool per group.
+
+    Subscription, not e-mail: one address can hold several unrelated subscriptions
+    (a Claude plan and an Antigravity plan can share one address) whose quotas
+    never share a pool. The main pins to the top; the rest sort tightest-first so
+    whatever can block a lane is read early.
+    """
+    groups = collections.OrderedDict()
+    for r in rows:
+        groups.setdefault(r.get("sub", "?"), []).append(r)
+    out = [(sub, g[0].get("account", "계정 미상"), g) for sub, g in groups.items()]
+
+    def key(entry):
+        return (0 if entry[0] == main else 1,
+                binding_score([w for r in entry[2] for w in r["windows"]]))
+    return sorted(out, key=key)
+
+
+def main_launch_cmd(db, rows):
+    """(command_prefix, error, warning).
+
+    Naming a subscription as main is an explicit override of its reserve floor,
+    so it launches -- but never silently: the caller prints the warning.
+    """
+    sub = get_setting(db, "main")
+    if not sub:
+        return None, L("메인 미지정 — --set-main 으로 정한다",
+                       "no main set — choose one with --set-main"), ""
+    wins = [w for r in rows if r["sub"] == sub for w in r["windows"]]
+    floor = reserve_floor(sub)
+    warn = ""
+    if floor is not None:
+        if not wins:
+            return None, f"{sub}: 관측값 없어 하한 {floor:.0f}% 확인 불가 — BLOCKED", ""
+        low = min(w["remaining"] for w in wins)
+        if low < floor:
+            # surfaced on the page, not here: this command runs inside a command
+            # substitution where stderr is swallowed by the launch line
+            warn = f"{sub} {low:.0f}% < {floor:.0f}%"
+    if sub.startswith("Claude"):
+        return "claude --permission-mode bypassPermissions", "", warn
+    home = codex_home_for(sub.split()[-1].lower())
+    if not home:
+        return None, L(f"{sub}: codex 홈을 못 찾음", f"{sub}: no codex home found"), ""
+    return f'env CODEX_HOME="{home}" codex', "", warn
+
+
+# --------------------------------------------------------------- rendering
+
+def esc(s):
+    return htmllib.escape(str(s), quote=True)
+
+
+ICONS = {
+    "GO": '<path d="M20 6 9 17l-5-5"/>',
+    "TIGHT": '<path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
+    "LOW": '<circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>',
+    "BLOCKED": '<circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/>',
+    "STALE": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "UNKNOWN": '<circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/>',
+}
+STATE_ORDER = ["BLOCKED", "LOW", "STALE", "TIGHT", "UNKNOWN", "GO"]
+
+# Vendor marks. Claude and Gemini are the official monochrome marks (simple-icons).
+# OpenAI's mark is not published there, and guessing a brand path would render
+# wrong and misuse the trademark -- Codex gets a neutral terminal glyph, not a logo.
+VENDOR = {
+    "codex": ('<path d="M3 4h18a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zm1 2v12h16V6zm2.6 2.3 3.5 3.2a.7.7 0 0 1 0 1l-3.5 3.2-.9-1L8.6 12 5.7 9.3zM12 15h5v1.4h-5z"/>', "Codex"),
+    "claude": ('<path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/>', "Claude"),
+    "gemini": ('<path d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81"/>', "Gemini"),
+}
+
+
+def icon(state):
+    return ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+            'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+            f'{ICONS.get(state, ICONS["UNKNOWN"])}</svg>')
+
+
+def vendor_icon(sub):
+    low = sub.lower()
+    key = ("codex" if low.startswith("codex") else "claude" if low.startswith("claude")
+           else "gemini" if low.startswith("antigravity") else None)
+    if not key:
+        return ""
+    path, name = VENDOR[key]
+    return (f'<svg class="brand" viewBox="0 0 24 24" fill="currentColor" role="img" '
+            f'aria-label="{name}">{path}</svg>')
+
+
+def render_text(db, rows, consumers):
+    main = get_setting(db, "main")
+    print(f"== lane dispatch gauge  {now:%Y-%m-%d %H:%M} ==")
+    print(L("   메인: ", "   main: ") + (main or L("미지정 (문서 기본 순서)", "unset (document default)")) + "\n")
+    for sub, account, group in group_by_subscription(rows, main):
+        print(f"┌ {sub}   ({account}){(L('   ★ 메인', '   * MAIN') if sub == main else '')}")
+        pol = policy_of(sub)
+        if pol:
+            print(f"    ({pol[0]}) {pol[1]}")
+        rs = reserve_state(sub, [w for r in group for w in r["windows"]], sub == main)
+        if rs:
+            print(f"    [{rs[0]}] {rs[1]}")
+        bind = binding_window([w for r in group for w in r["windows"]])
+        for r in group:
+            if r.get("pool"):
+                print(f"  {r['pool']}")
+            for w in r["windows"]:
+                state, why = w["verdict"]
+                rate = burn_rate(db, sub, w["name"])
+                print(f"    {w['name']}: " + L("잔량 ", "left ") + f"{w['remaining']:.0f}%"
+                      + (L("  [회복 임박]", "  [recovering]") if is_imminent(w.get("resets"))
+                         else L("  [제약]", "  [binds]") if w is bind and w["verdict"][0] != "GO" else "")
+                      + (L(f"  (소모 {rate:.1f}%p/h)", f"  (burn {rate:.1f}%p/h)") if rate else ""))
+                if w["resets"]:
+                    when, left = fmt_reset(w["resets"])
+                    print("      " + L("회복 ", "resets ") + f"{when}  ({left})")
+                print(f"      -> {state}: {why}")
+            if r.get("note"):
+                print(f"    {r['note']}")
+        print()
+    print(L("[실행 중인 codex]", "[running codex]"))
+    if not consumers:
+        print(L("  없음", "  none"))
+    for home, n in consumers.most_common():
+        print(f"  {n}x  {home.replace(os.path.expanduser('~'), '~')}")
+
+
+CSS = """
+:root{--bg:#f4f5f7;--surface:#fff;--fg:#16181d;--dim:#5c6270;--line:#dfe2e8;
+ --ok:#15803d;--tight:#a16207;--low:#c2410c;--blocked:#b91c1c;--stale:#6d28d9;
+ --track:#e6e8ee;--accent:#1d4ed8;--gap:8px;--pad:12px}
+@media (prefers-color-scheme:dark){:root{--bg:#0f172a;--surface:#171e2e;--fg:#f1f4f9;
+ --dim:#97a0b3;--line:#2c3547;--ok:#4ade80;--tight:#fbbf24;--low:#fb923c;
+ --blocked:#f87171;--stale:#c4b5fd;--track:#232c3d;--accent:#93b4fd}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-variant-numeric:tabular-nums;
+ font:14px/1.45 ui-sans-serif,-apple-system,"Segoe UI","Helvetica Neue",sans-serif}
+.wrap{max-width:1440px;margin:0 auto;padding:var(--pad)}
+header{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--line);
+ padding:10px var(--pad);display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+h1{font-size:14px;font-weight:700;margin:0}
+.stamp{font-size:12px;color:var(--dim)}
+.headline{margin-left:auto;font-size:12px;display:flex;align-items:center;gap:6px}
+.warnbar{margin-left:auto;font-size:12px;font-weight:600;align-items:center;gap:6px;
+ padding:4px 10px;border-radius:6px;color:var(--c);
+ background:color-mix(in srgb,var(--c) 14%,transparent);
+ border:1px solid color-mix(in srgb,var(--c) 45%,transparent)}
+.warnbar+.headline{margin-left:8px}
+.grid{display:grid;gap:var(--gap);grid-template-columns:1fr;margin-top:var(--gap)}
+@media (min-width:768px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media (min-width:1280px){.grid{grid-template-columns:repeat(3,1fr)}}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+ padding:var(--pad);display:flex;flex-direction:column}
+.card.ismain{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.card-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+ flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.sub{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px}
+.brand{width:15px;height:15px;flex:none;color:var(--dim)}
+.who{font-size:11px;color:var(--dim);word-break:break-all}
+.mainbadge{font-size:10px;font-weight:700;color:var(--accent);border:1px solid var(--accent);
+ border-radius:4px;padding:1px 5px;letter-spacing:.04em}
+.policy{font-size:11px;color:var(--dim);margin-top:6px}
+.policy b{color:var(--fg);font-weight:700}
+.pool{font-size:11px;font-weight:600;color:var(--dim);text-transform:uppercase;
+ letter-spacing:.05em;margin:10px 0 4px}
+.win{margin:8px 0}
+.win-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12px}
+.win-name{color:var(--dim)}
+.pct{font-size:15px;font-weight:700;color:var(--c)}
+.resetrow{display:flex;align-items:baseline;gap:6px;margin-top:5px;padding:4px 7px;
+ border-radius:5px;background:var(--track);font-size:12px}
+.resetrow.soon{background:color-mix(in srgb,var(--c) 14%,transparent)}
+.rlabel{font-size:10px;color:var(--dim);letter-spacing:.05em}
+.rwhen{font-weight:700;color:var(--fg)}
+.rleft{margin-left:auto;color:var(--dim);font-size:11px}
+.resetrow.soon .rleft{color:var(--c);font-weight:600}
+.pace{font-size:11px;color:var(--dim);margin-top:4px}
+.soonchip{margin-left:6px;font-size:9px;font-weight:700;letter-spacing:.04em;
+ padding:1px 5px;border-radius:4px;color:var(--c);
+ background:color-mix(in srgb,var(--c) 16%,transparent)}
+.win.dim .bar,.win.dim .pct{opacity:.55}
+.bindchip{margin-left:6px;font-size:9px;font-weight:700;letter-spacing:.04em;
+ padding:1px 5px;border-radius:4px;color:var(--surface);background:var(--c)}
+.bar{height:6px;background:var(--track);border-radius:3px;overflow:hidden;margin:4px 0 5px}
+.bar>i{display:block;height:100%;border-radius:3px;background:var(--c)}
+.status{display:flex;align-items:flex-start;gap:5px;font-size:11px;color:var(--dim)}
+.status svg{flex:none;width:13px;height:13px;color:var(--c);margin-top:1px}
+.tag{color:var(--c);font-weight:700;letter-spacing:.03em}
+[data-s="GO"]{--c:var(--ok)}[data-s="TIGHT"]{--c:var(--tight)}[data-s="LOW"]{--c:var(--low)}
+[data-s="BLOCKED"]{--c:var(--blocked)}[data-s="STALE"]{--c:var(--stale)}
+[data-s="UNKNOWN"]{--c:var(--dim)}
+.reserve{margin-top:8px;padding:6px 8px;border-radius:6px;font-size:11px;
+ background:color-mix(in srgb,var(--c) 10%,transparent)}
+.note{font-size:11px;color:var(--dim);margin-top:8px}
+form.pick{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line)}
+button{font:inherit;font-size:11px;font-weight:600;cursor:pointer;padding:6px 12px;
+ border-radius:6px;border:1px solid var(--line);background:var(--surface);color:var(--fg);
+ min-height:32px}
+button:hover:not([disabled]){border-color:var(--accent);color:var(--accent)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button[disabled]{opacity:.45;cursor:not-allowed}
+.hint{font-size:11px;color:var(--dim);margin-left:8px}
+.langsw{display:inline-flex;margin-left:10px;border:1px solid var(--line);
+ border-radius:6px;overflow:hidden}
+.langsw a{font-size:11px;font-weight:600;color:var(--dim);text-decoration:none;
+ padding:3px 9px;min-height:24px;display:flex;align-items:center}
+.langsw a+a{border-left:1px solid var(--line)}
+.langsw a:hover{color:var(--fg)}
+.langsw a.on{background:var(--accent);color:var(--surface)}
+.langsw a:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:4px}
+th{text-align:left;font-weight:600;color:var(--dim);font-size:11px;text-transform:uppercase;
+ letter-spacing:.05em;padding:4px 0}
+td{padding:6px 0;border-top:1px solid var(--line);vertical-align:top}
+td.n{text-align:right;font-weight:600;width:3.5em}
+td.p{word-break:break-all;color:var(--dim)}
+footer{font-size:11px;color:var(--dim);line-height:1.7;margin-top:var(--gap);
+ padding:var(--pad);border-top:1px solid var(--line)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+"""
+
+
+def apply_lang(db, override=None):
+    global LANG
+    LANG = override or get_setting(db, "lang", "ko") or "ko"
+    if LANG not in ("ko", "en"):
+        LANG = "ko"
+
+
+def render_html(db, rows, consumers, path=None, interactive=False):
+    main = get_setting(db, "main")
+    groups = group_by_subscription(rows, main)
+    states = [w["verdict"][0] for _, _, g in groups
+              for w in binding_windows([w2 for r in g for w2 in r["windows"]])]
+    # a subscription with no readable window is UNKNOWN, not "여유"
+    states += ["UNKNOWN" for _, _, g in groups if not any(r["windows"] for r in g)]
+    worst = next((s for s in STATE_ORDER if s in states), "UNKNOWN")
+    worst_text = {
+        "GO": L("모든 구독 여유", "every subscription has headroom"),
+        "TIGHT": L("일부 구독 빠듯 — 긴 작업 주의", "some are tight — mind long jobs"),
+        "LOW": L("잔량 부족 구독 있음", "a subscription is running low"),
+        "BLOCKED": L("소진된 구독 있음", "a subscription is exhausted"),
+        "STALE": L("관측이 오래된 구독 있음", "a reading is stale"),
+        "UNKNOWN": L("못 읽은 구독 있음 — 카드 확인", "a subscription could not be read"),
+    }[worst]
+    selectable = {sub for sub, _, _ in groups if not sub.startswith("Antigravity")}
+
+    # the subscription being burned below its own reserve floor, if any. This is
+    # surfaced here rather than on stderr: --main-cmd runs inside a command
+    # substitution, where a warning is swallowed by the launch line.
+    over = next((sub for sub, _, g in groups if sub == main
+                 and (reserve_state(sub, [w for r in g for w in r["windows"]], True)
+                      or ("", ""))[0] == "LOW"), None)
+    langsw = ('<div class="langsw" role="group" aria-label="Language">'
+              + "".join(f'<a class="{"on" if LANG == code else ""}" href="/?lang={code}"'
+                        + (' aria-current="true"' if LANG == code else "")
+                        + f'>{name}</a>'
+                        for code, name in (("ko", "한국어"), ("en", "EN")))
+              + '</div>')
+    warnbar = (f'<span class="warnbar status" data-s="LOW">{icon("TIGHT")}<span>'
+               + esc(L(f"{over} — 예비 아래를 태우는 중. 이 구독을 직접 쓰는 작업이 먼저 끊길 수 있다",
+                       f"{over} — burning below its reserve; "
+                       "your own use of this plan may stop first"))
+               + '</span></span>') if over else ""
+
+    p = [f'<header><h1>lane dispatch gauge</h1>'
+         f'<span class="stamp">{now:%Y-%m-%d %H:%M} · '
+         + L("메인 ", "main ")
+         + f'{esc(main or L("미지정 (문서 기본 순서)", "unset (document default)"))}</span>'
+         + langsw + warnbar
+         + f'<span class="headline status" data-s="{worst}">{icon(worst)}'
+           f'<span><span class="tag">{worst}</span> {esc(worst_text)}</span></span></header>'
+           f'<div class="wrap"><div class="grid">']
+
+    for sub, account, group in groups:
+        is_main = sub == main
+        p.append(f'<section class="card{" ismain" if is_main else ""}"><div class="card-head">'
+                 f'<span class="sub">{vendor_icon(sub)}{esc(sub)}'
+                 f'{f'<span class="mainbadge">{L("메인", "MAIN")}</span>' if is_main else ""}</span>'
+                 f'<span class="who">{esc(account)}</span></div>')
+        pol = policy_of(sub)
+        if pol:
+            p.append(f'<div class="policy"><b>{esc(pol[0])}</b> {esc(pol[1])}</div>')
+        rs = reserve_state(sub, [w for r in group for w in r["windows"]], is_main)
+        if rs:
+            p.append(f'<div class="reserve status" data-s="{rs[0]}">{icon(rs[0])}'
+                     f'<span>{esc(rs[1])}</span></div>')
+        bind = binding_window([w for r in group for w in r["windows"]])
+        for r in group:
+            if r.get("pool"):
+                p.append(f'<div class="pool">{esc(r["pool"])}</div>')
+            for w in r["windows"]:
+                state, why = w["verdict"]
+                rate = burn_rate(db, sub, w["name"])
+                soon = is_imminent(w.get("resets"))
+                if w["resets"]:
+                    when, left = fmt_reset(w["resets"])
+                    reset_row = (f'<div class="resetrow{" soon" if soon else ""}">'
+                                 f'<span class="rlabel">{L("회복", "resets")}</span>'
+                                 f'<span class="rwhen">{esc(when)}</span>'
+                                 f'<span class="rleft">{esc(left)}</span></div>')
+                else:
+                    reset_row = ""
+                pace = (f'<div class="pace">{L("소모", "burn")} {rate:.1f}%p/h</div>' if rate else "")
+                p.append(
+                    f'<div class="win" data-s="{state}">'
+                    f'<div class="win-head"><span class="win-name">{esc(w["name"])}'
+                    + (f'<span class="soonchip">{L("회복 임박", "recovering")}</span>' if soon
+                       else f'<span class="bindchip">{L("제약", "binds")}</span>'
+                       if w is bind and state != "GO" else '') +
+                    f'</span><span class="pct">{w["remaining"]:.0f}%</span></div>'
+                    f'<div class="bar"><i style="width:{max(0, min(100, w["remaining"])):.0f}%"></i></div>'
+                    f'<div class="status">{icon(state)}<span><span class="tag">{state}</span> '
+                    f'{esc(why)}</span></div>{reset_row}{pace}</div>')
+            if r.get("note"):
+                p.append(f'<div class="note">{esc(r["note"])}</div>')
+        if interactive and sub in selectable:
+            over = bool(rs and rs[0] == "BLOCKED")
+            target = "auto" if is_main else sub_key(sub)
+            p.append(f'<form class="pick" method="post" action="/main">'
+                     f'<input type="hidden" name="key" value="{target}">'
+                     f'<button type="submit">'
+                     f'{L("메인 해제", "Unset main") if is_main else L("메인으로 지정", "Set as main")}</button>'
+                     + (f'<span class="hint">{L("하한 아래 — 지정하면 태운다", "below the floor — setting it burns through")}</span>' if over else "")
+                     + '</form>')
+        p.append("</section>")
+
+    p.append(f'<section class="card"><div class="card-head">'
+             f'<span class="sub">{L("실행 중인 codex", "running codex")}</span>'
+             f'<span class="who">{sum(consumers.values())}' + L("개 프로세스", " processes") + '</span></div>'
+             '<table><thead><tr><th scope="col">CODEX_HOME</th>'
+             f'<th scope="col" style="text-align:right">{L("수", "count")}</th></tr></thead><tbody>')
+    if not consumers:
+        p.append(f'<tr><td class="p">{L("없음", "none")}</td><td class="n">0</td></tr>')
+    for home, n in consumers.most_common():
+        p.append(f'<tr><td class="p">{esc(home.replace(os.path.expanduser("~"), "~"))}</td>'
+                 f'<td class="n">{n}</td></tr>')
+    p.append("</tbody></table></section></div>")
+
+    p.append('<footer>'
+             + L('출처 — Codex: 세션 롤아웃 <code>rate_limits</code> · '
+                 'Claude: <code>/api/oauth/usage</code> · agy: 로컬 language server RPC. ',
+                 'Sources — Codex: session rollout <code>rate_limits</code> · '
+                 'Claude: <code>/api/oauth/usage</code> · agy: local language server RPC. ')
+             + (L("새로고침하면 갱신", "refresh to update") if interactive
+                else L("갱신은 스크립트 재실행", "re-run the script to update"))
+             + L('.<br>계측 전용 — 어떤 소스도 모델에 프롬프트를 보내지 않으므로 quota 를 '
+                 '소모하지 않는다. 메인은 사람이 정하는 설정이며 이 도구는 아무것도 실행하지 않는다.',
+                 '.<br>Metering only — no source sends a prompt to a model, so none of this '
+                 'spends quota. The main is your setting; this tool runs nothing itself.')
+             + '</footer></div>')
+
+    doc = (f'<!doctype html><html lang="{LANG}"><head><meta charset="utf-8">'
+           '<meta name="viewport" content="width=device-width,initial-scale=1">'
+           f'<title>lane dispatch gauge</title><style>' + CSS + '</style></head>'
+           '<body>' + "".join(p) + '</body></html>')
+    if path:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(doc)
+    return doc
+
+
+# ------------------------------------------------------------------- serve
+
+def serve(port):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, body, ctype="text/html; charset=utf-8", extra=None):
+            data = body.encode() if isinstance(body, str) else body
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path not in ("/", "/index.html"):
+                return self._send(404, "not found", "text/plain; charset=utf-8")
+            global now
+            now = datetime.datetime.now()
+            db = connect()
+            try:
+                want = (urllib.parse.parse_qs(parsed.query).get("lang") or [""])[0]
+                if want in ("ko", "en"):
+                    set_setting(db, "lang", want)
+                apply_lang(db)
+                rows, consumers = collect(db)
+                self._send(200, render_html(db, rows, consumers, interactive=True))
+            finally:
+                db.close()
+
+        def do_POST(self):
+            if self.path != "/main":
+                return self._send(404, "not found", "text/plain; charset=utf-8")
+            n = int(self.headers.get("Content-Length") or 0)
+            key = (urllib.parse.parse_qs(self.rfile.read(n).decode()).get("key") or [""])[0]
+            db = connect()
+            try:
+                if key == "auto":
+                    set_setting(db, "main", "")
+                else:
+                    rows, _ = collect(db)
+                    hit = next((r["sub"] for r in rows if sub_key(r["sub"]) == key), "")
+                    set_setting(db, "main", hit)
+            finally:
+                db.close()
+            self._send(303, b"", "text/plain", {"Location": "/"})
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    print(f"lane dispatch gauge — http://127.0.0.1:{port}/   (Ctrl-C 로 종료)")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n종료")
+    return 0
+
+
+# --------------------------------------------------------------------- cli
+
+def main(argv):
+    args = argv[1:]
+    db = connect()
+    try:
+        if "--lang" in args:
+            i = args.index("--lang")
+            want = args[i + 1] if len(args) > i + 1 else ""
+            if want not in ("ko", "en"):
+                print("사용: --lang ko|en", file=sys.stderr)
+                return 2
+            set_setting(db, "lang", want)
+            print(f"lang = {want}")
+            return 0
+        load_config()
+        apply_lang(db)
+        if "--set-main" in args:
+            i = args.index("--set-main")
+            key = args[i + 1] if len(args) > i + 1 else ""
+            if key == "auto":
+                set_setting(db, "main", "")
+                print(L("메인 해제", "main cleared"))
+                return 0
+            rows, _ = collect(db)
+            hit = next((r["sub"] for r in rows if sub_key(r["sub"]) == key), None)
+            if not hit:
+                keys = sorted({sub_key(r["sub"]) for r in rows})
+                print("usage: --set-main " + "|".join(keys + ["auto"]), file=sys.stderr)
+                return 2
+            set_setting(db, "main", hit)
+            print(L(f"메인 = {hit}", f"main = {hit}"))
+            return 0
+
+        if "--main-cmd" in args:
+            rows, _ = collect(db)
+            cmd, err, warn = main_launch_cmd(db, rows)
+            if err:
+                print(err, file=sys.stderr)
+                return 1
+            print(cmd)
+            return 0
+
+        if "--serve" in args:
+            i = args.index("--serve")
+            port = int(args[i + 1]) if len(args) > i + 1 and args[i + 1].isdigit() else 8787
+            db.close()
+            return serve(port)
+
+        rows, consumers = collect(db)
+        if "--json" in args:
+            main = get_setting(db, "main")
+            print(json.dumps({
+                "takenAt": now.isoformat(timespec="seconds"),
+                "main": main,
+                "subscriptions": [
+                    {"sub": sub, "key": sub_key(sub), "account": account,
+                     "isMain": sub == main,
+                     "selectable": not sub.startswith("Antigravity"),
+                     "reserve": (lambda rs: {"state": rs[0], "text": rs[1]} if rs else None)(
+                         reserve_state(sub, [w for r in g for w in r["windows"]], sub == main)),
+                     "windows": [
+                         {"name": w["name"], "pool": r.get("pool"),
+                          "remaining": round(w["remaining"], 1),
+                          "state": w["verdict"][0], "why": w["verdict"][1],
+                          "resetsAt": w["resets"].isoformat() if w["resets"] else None,
+                          "imminent": is_imminent(w.get("resets")),
+                          "binds": w is binding_window([w2 for r2 in g for w2 in r2["windows"]])}
+                         for r in g for w in r["windows"]],
+                     "note": next((r["note"] for r in g if r.get("note")), "")}
+                    for sub, account, g in group_by_subscription(rows, main)],
+                "runningCodex": [{"home": h, "count": n} for h, n in consumers.most_common()],
+            }, ensure_ascii=False, indent=2))
+            return 0
+        if "--html" in args:
+            i = args.index("--html")
+            path = (args[i + 1] if len(args) > i + 1 and not args[i + 1].startswith("-")
+                    else "quota.html")
+            path = os.path.abspath(path)
+            render_html(db, rows, consumers, path=path)
+            print(f"wrote {path}\nopen: file://{path}")
+            return 0
+        render_text(db, rows, consumers)
+        return 0
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

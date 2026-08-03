@@ -1,0 +1,9 @@
+{
+  "reserve": { "Claude": 20 },
+  "policy": {
+    "Codex ProLite": ["1st", "default lane — about half of Pro's capacity"],
+    "Codex Pro": ["2nd", "when ProLite runs short"],
+    "Claude Max": ["deadlines only", "kept for your own conversation — 20% floor"]
+  },
+  "imminent_minutes": 60
+}
