@@ -67,46 +67,60 @@ func shortName(_ sub: String) -> String {
 }
 
 /// Draws one small column per subscription -- label above, reading below -- and
-/// returns it as the status item image. Drawing to an image rather than hosting a
+/// returns it as the status item image.
+///
+/// The menu bar is translucent, so whatever wallpaper is behind it shows through:
+/// coloured text over a colourful desktop is unreadable, and a green figure on a
+/// green wallpaper disappears entirely. Text is therefore drawn in the system
+/// label colour, which macOS flips for a light or dark menu bar, and the state
+/// rides on a small filled dot instead. Drawing to an image rather than hosting a
 /// custom view keeps the normal button behaviour: one click still opens the menu.
-func renderStatus(_ subs: [Subscription]) -> NSImage {
-    let nameFont = NSFont.systemFont(ofSize: 8, weight: .semibold)
-    let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold)
-    let tailFont = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .medium)
-    let gap: CGFloat = 9, height: CGFloat = 22
+func renderStatus(_ subs: [Subscription], appearance: NSAppearance?) -> NSImage {
+    let nameFont = NSFont.systemFont(ofSize: 9, weight: .bold)
+    let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold)
+    let tailFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
+    let gap: CGFloat = 12, dot: CGFloat = 5, height: CGFloat = 22
 
-    struct Column { let name: NSAttributedString; let value: NSAttributedString; let width: CGFloat }
+    struct Column {
+        let name: NSAttributedString
+        let value: NSAttributedString
+        let tint: NSColor
+        let width: CGFloat
+    }
     var columns: [Column] = []
 
     for sub in subs {
         guard let win = bindingWindow(sub) else { continue }
         let name = NSAttributedString(string: shortName(sub.sub), attributes: [
-            .font: nameFont, .foregroundColor: NSColor.secondaryLabelColor,
-            .kern: 0.4])
+            .font: nameFont,
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.75),
+            .kern: 0.5])
         let value = NSMutableAttributedString(
             string: "\(Int(win.remaining.rounded()))%",
-            attributes: [.font: valueFont, .foregroundColor: colour(for: win.state)])
+            attributes: [.font: valueFont, .foregroundColor: NSColor.labelColor])
         if !win.resetsIn.isEmpty {
-            // just the magnitude: "2시간 47분 후" is too wide for a menu bar
+            // magnitude only: "2시간 47분 후" is far too wide for a menu bar
             let compact = win.resetsIn
                 .replacingOccurrences(of: " 후", with: "")
                 .replacingOccurrences(of: "in ", with: "")
                 .split(separator: " ").first.map(String.init) ?? ""
             if !compact.isEmpty {
                 value.append(NSAttributedString(string: " " + compact, attributes: [
-                    .font: tailFont, .foregroundColor: NSColor.tertiaryLabelColor]))
+                    .font: tailFont,
+                    .foregroundColor: NSColor.labelColor.withAlphaComponent(0.6)]))
             }
         }
+        let width = max(name.size().width, value.size().width + dot + 4)
         columns.append(Column(name: name, value: value,
-                              width: max(name.size().width, value.size().width)))
+                              tint: colour(for: win.state), width: width))
     }
     guard !columns.isEmpty else {
-        let empty = NSImage(size: NSSize(width: 44, height: height))
+        let empty = NSImage(size: NSSize(width: 46, height: height))
         empty.lockFocus()
         NSAttributedString(string: "dipstick", attributes: [
-            .font: NSFont.systemFont(ofSize: 10),
-            .foregroundColor: NSColor.secondaryLabelColor])
-            .draw(at: NSPoint(x: 0, y: 6))
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.7)])
+            .draw(at: NSPoint(x: 0, y: 5))
         empty.unlockFocus()
         return empty
     }
@@ -114,16 +128,25 @@ func renderStatus(_ subs: [Subscription]) -> NSImage {
     let total = columns.reduce(0) { $0 + $1.width } + gap * CGFloat(columns.count - 1)
     let image = NSImage(size: NSSize(width: ceil(total), height: height))
     image.lockFocus()
+    // resolve labelColor against the menu bar's own appearance, not the app's
+    let previous = NSAppearance.current
+    if let appearance { NSAppearance.current = appearance }
     var x: CGFloat = 0
     for column in columns {
         let nameX = x + (column.width - column.name.size().width) / 2
-        let valueX = x + (column.width - column.value.size().width) / 2
         column.name.draw(at: NSPoint(x: nameX, y: 12))
-        column.value.draw(at: NSPoint(x: valueX, y: 1))
+
+        let valueWidth = column.value.size().width
+        let blockWidth = valueWidth + dot + 4
+        let blockX = x + (column.width - blockWidth) / 2
+        column.tint.setFill()
+        NSBezierPath(ovalIn: NSRect(x: blockX, y: 5, width: dot, height: dot)).fill()
+        column.value.draw(at: NSPoint(x: blockX + dot + 4, y: 0))
         x += column.width + gap
     }
+    NSAppearance.current = previous
     image.unlockFocus()
-    image.isTemplate = false        // the state colours must survive
+    image.isTemplate = false        // the state dots must keep their colour
     return image
 }
 
@@ -224,7 +247,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             + withData.filter { !$0.isMain }
                 .sorted { (bindingWindow($0)?.remaining ?? 101) < (bindingWindow($1)?.remaining ?? 101) }
         button.title = ""
-        button.image = renderStatus(Array(ordered.prefix(3)))
+        button.image = renderStatus(Array(ordered.prefix(3)),
+                                    appearance: button.effectiveAppearance)
         button.toolTip = ordered.compactMap { sub in
             bindingWindow(sub).map { "\(sub.sub) · \($0.name) \(Int($0.remaining.rounded()))% · \($0.why)" }
         }.joined(separator: "\n")
