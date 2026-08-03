@@ -1127,12 +1127,30 @@ def main(argv):
                           "remaining": round(w["remaining"], 1),
                           "state": w["verdict"][0], "why": w["verdict"][1],
                           "resetsAt": w["resets"].isoformat() if w["resets"] else None,
+                          "resetsIn": (fmt_left((w["resets"] - now).total_seconds())
+                                       if w["resets"] else ""),
                           "imminent": is_imminent(w.get("resets")),
                           "binds": w is binding_window([w2 for r2 in g for w2 in r2["windows"]])}
                          for r in g for w in r["windows"]],
                      "note": next((r["note"] for r in g if r.get("note")), "")}
                     for sub, account, g in group_by_subscription(rows, main)],
                 "runningCodex": [{"home": h, "count": n} for h, n in consumers.most_common()],
+                # the menu bar app renders these verbatim so one language holds
+                # across the CLI, the web UI and the menu
+                "lang": LANG,
+                "strings": {
+                    "setAsMain": L("메인으로 지정", "Set as main"),
+                    "unsetMain": L("메인 해제", "Unset as main"),
+                    "openDashboard": L("대시보드 열기…", "Open dashboard…"),
+                    "refresh": L("지금 새로고침", "Refresh now"),
+                    "quit": L("Dipstick 종료", "Quit Dipstick"),
+                    "binds": L("제약", "binds"),
+                    "recovering": L("회복 임박", "recovering"),
+                    "running": L("codex {n}개 실행 중", "{n} codex processes running"),
+                    "updated": L("갱신 {t}", "updated {t}"),
+                    "noReading": L("관측값 없음", "no reading yet"),
+                    "notFound": L("dipstick CLI 를 찾을 수 없음", "dipstick CLI not found"),
+                },
             }, ensure_ascii=False, indent=2))
             return 0
         if "--html" in args:

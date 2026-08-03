@@ -15,6 +15,10 @@ struct Snapshot: Decodable {
     let main: String
     let subscriptions: [Subscription]
     let runningCodex: [Running]
+    /// Rendered verbatim. The CLI already localises everything it prints, so the
+    /// app borrows those strings instead of formatting its own -- otherwise a
+    /// Korean reading ends up next to an English "resets in 1h 28m".
+    let strings: [String: String]
 }
 
 struct Subscription: Decodable {
@@ -40,6 +44,7 @@ struct Window: Decodable {
     let state: String
     let why: String
     let resetsAt: String?
+    let resetsIn: String
     let imminent: Bool
     let binds: Bool
 }
@@ -47,6 +52,79 @@ struct Window: Decodable {
 struct Running: Decodable {
     let home: String
     let count: Int
+}
+
+// MARK: - Status bar rendering
+
+/// Menu bar space is scarce, so a subscription is shown by the part of its name
+/// that distinguishes it from the others rather than its full label.
+func shortName(_ sub: String) -> String {
+    let words = sub.split(separator: " ")
+    if sub.hasPrefix("Codex") { return String(words.last ?? "CODEX").uppercased() }
+    if sub.hasPrefix("Claude") { return "CLAUDE" }
+    if sub.hasPrefix("Antigravity") { return "AGY" }
+    return String(words.first ?? "?").uppercased()
+}
+
+/// Draws one small column per subscription -- label above, reading below -- and
+/// returns it as the status item image. Drawing to an image rather than hosting a
+/// custom view keeps the normal button behaviour: one click still opens the menu.
+func renderStatus(_ subs: [Subscription]) -> NSImage {
+    let nameFont = NSFont.systemFont(ofSize: 8, weight: .semibold)
+    let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold)
+    let tailFont = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .medium)
+    let gap: CGFloat = 9, height: CGFloat = 22
+
+    struct Column { let name: NSAttributedString; let value: NSAttributedString; let width: CGFloat }
+    var columns: [Column] = []
+
+    for sub in subs {
+        guard let win = bindingWindow(sub) else { continue }
+        let name = NSAttributedString(string: shortName(sub.sub), attributes: [
+            .font: nameFont, .foregroundColor: NSColor.secondaryLabelColor,
+            .kern: 0.4])
+        let value = NSMutableAttributedString(
+            string: "\(Int(win.remaining.rounded()))%",
+            attributes: [.font: valueFont, .foregroundColor: colour(for: win.state)])
+        if !win.resetsIn.isEmpty {
+            // just the magnitude: "2시간 47분 후" is too wide for a menu bar
+            let compact = win.resetsIn
+                .replacingOccurrences(of: " 후", with: "")
+                .replacingOccurrences(of: "in ", with: "")
+                .split(separator: " ").first.map(String.init) ?? ""
+            if !compact.isEmpty {
+                value.append(NSAttributedString(string: " " + compact, attributes: [
+                    .font: tailFont, .foregroundColor: NSColor.tertiaryLabelColor]))
+            }
+        }
+        columns.append(Column(name: name, value: value,
+                              width: max(name.size().width, value.size().width)))
+    }
+    guard !columns.isEmpty else {
+        let empty = NSImage(size: NSSize(width: 44, height: height))
+        empty.lockFocus()
+        NSAttributedString(string: "dipstick", attributes: [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: NSColor.secondaryLabelColor])
+            .draw(at: NSPoint(x: 0, y: 6))
+        empty.unlockFocus()
+        return empty
+    }
+
+    let total = columns.reduce(0) { $0 + $1.width } + gap * CGFloat(columns.count - 1)
+    let image = NSImage(size: NSSize(width: ceil(total), height: height))
+    image.lockFocus()
+    var x: CGFloat = 0
+    for column in columns {
+        let nameX = x + (column.width - column.name.size().width) / 2
+        let valueX = x + (column.width - column.value.size().width) / 2
+        column.name.draw(at: NSPoint(x: nameX, y: 12))
+        column.value.draw(at: NSPoint(x: valueX, y: 1))
+        x += column.width + gap
+    }
+    image.unlockFocus()
+    image.isTemplate = false        // the state colours must survive
+    return image
 }
 
 // MARK: - Presentation
@@ -67,37 +145,6 @@ func colour(for state: String) -> NSColor {
 /// binding, falling back to the lowest reading.
 func bindingWindow(_ sub: Subscription) -> Window? {
     sub.windows.first(where: { $0.binds }) ?? sub.windows.min(by: { $0.remaining < $1.remaining })
-}
-
-func shortTime(_ iso: String?) -> String {
-    guard let iso, let date = parseTimestamp(iso) else { return "" }
-    let secs = date.timeIntervalSinceNow
-    if secs < 0 { return "due" }
-    let mins = Int(secs / 60)
-    if mins < 60 { return "\(mins)m" }
-    let (h, m) = (mins / 60, mins % 60)
-    if h < 24 { return m == 0 ? "\(h)h" : "\(h)h \(m)m" }
-    return "\(h / 24)d \(h % 24)h"
-}
-
-private let isoParser: ISO8601DateFormatter = {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return f
-}()
-
-private let localParser: DateFormatter = {
-    let f = DateFormatter()
-    f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-    f.timeZone = .current
-    f.locale = Locale(identifier: "en_US_POSIX")
-    return f
-}()
-
-/// `--json` emits local time with no zone designator, which the strict ISO parser
-/// rejects, so fall back to a plain local formatter before giving up.
-func parseTimestamp(_ string: String) -> Date? {
-    isoParser.date(from: string) ?? localParser.date(from: String(string.prefix(19)))
 }
 
 // MARK: - Running the CLI
@@ -163,28 +210,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateTitle() {
         guard let button = item.button else { return }
         guard let snap = snapshot else {
+            button.image = nil
             button.title = "dipstick ?"
             button.toolTip = CLI.path == nil
                 ? "dipstick CLI not found in ~/.local/bin or Homebrew"
                 : "Could not read a snapshot"
             return
         }
-        // Show the main subscription if one is set, else whatever is tightest --
-        // the number most likely to stop work either way.
-        let shown = snap.subscriptions.first(where: { $0.isMain })
-            ?? snap.subscriptions.min(by: {
-                (bindingWindow($0)?.remaining ?? 101) < (bindingWindow($1)?.remaining ?? 101)
-            })
-        guard let shown, let win = bindingWindow(shown) else {
-            button.title = "dipstick"
-            return
-        }
-        let text = "\(Int(win.remaining.rounded()))%"
-        button.attributedTitle = NSAttributedString(
-            string: text,
-            attributes: [.foregroundColor: colour(for: win.state),
-                         .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)])
-        button.toolTip = "\(shown.sub) · \(win.name) · \(win.why)"
+        // Main first, then whatever is tightest: the readings most likely to stop
+        // work. Everything else is one click away in the menu.
+        let withData = snap.subscriptions.filter { !$0.windows.isEmpty }
+        let ordered = withData.filter(\.isMain)
+            + withData.filter { !$0.isMain }
+                .sorted { (bindingWindow($0)?.remaining ?? 101) < (bindingWindow($1)?.remaining ?? 101) }
+        button.title = ""
+        button.image = renderStatus(Array(ordered.prefix(3)))
+        button.toolTip = ordered.compactMap { sub in
+            bindingWindow(sub).map { "\(sub.sub) · \($0.name) \(Int($0.remaining.rounded()))% · \($0.why)" }
+        }.joined(separator: "\n")
     }
 
     // MARK: menu actions
@@ -250,26 +293,17 @@ extension AppDelegate: NSMenuDelegate {
             menu.addItem(header)
 
             for win in sub.windows {
-                let bits = [win.pool, win.name].compactMap { $0 }.joined(separator: " · ")
-                let mark = win.binds ? " ◂ binds" : (win.imminent ? " ◂ recovering" : "")
-                let reset = shortTime(win.resetsAt)
-                let line = "    \(bits)  \(Int(win.remaining.rounded()))%"
-                    + (reset.isEmpty ? "" : "  ·  resets in \(reset)") + mark
-                let entry = disabled(line)
-                entry.attributedTitle = NSAttributedString(
-                    string: line,
-                    attributes: [.foregroundColor: colour(for: win.state),
-                                 .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)])
-                menu.addItem(entry)
+                menu.addItem(windowRow(win))
             }
             if let reserve = sub.reserve, reserve.state != "GO" {
-                menu.addItem(disabled("    ⚠ \(reserve.text)"))
+                menu.addItem(noteRow("⚠ " + reserve.text, colour(for: reserve.state)))
             }
-            if !sub.note.isEmpty { menu.addItem(disabled("    \(sub.note)")) }
+            if !sub.note.isEmpty { menu.addItem(noteRow(sub.note, .tertiaryLabelColor)) }
 
             if sub.selectable {
-                let title = sub.isMain ? "    Unset as main" : "    Set as main"
-                let pick = action(title, #selector(setMain(_:)))
+                let label = sub.isMain ? str("unsetMain", "Unset as main")
+                                       : str("setAsMain", "Set as main")
+                let pick = action("   " + label, #selector(setMain(_:)))
                 pick.representedObject = sub.isMain ? "auto" : sub.key
                 menu.addItem(pick)
             }
@@ -277,28 +311,83 @@ extension AppDelegate: NSMenuDelegate {
         }
 
         let running = snap.runningCodex.reduce(0) { $0 + $1.count }
-        if running > 0 { menu.addItem(disabled("\(running) codex processes running")) }
-        menu.addItem(disabled("Updated \(String(snap.takenAt.suffix(8)))"))
+        if running > 0 {
+            menu.addItem(noteRow(str("running", "{n} codex running")
+                .replacingOccurrences(of: "{n}", with: String(running)), .tertiaryLabelColor))
+        }
+        menu.addItem(noteRow(str("updated", "updated {t}")
+            .replacingOccurrences(of: "{t}", with: String(snap.takenAt.suffix(8))),
+            .tertiaryLabelColor))
         menu.addItem(.separator())
-        menu.addItem(action("Open dashboard…", #selector(openDashboard)))
-        menu.addItem(action("Refresh now", #selector(refresh)))
-        menu.addItem(action("Quit Dipstick", #selector(quit)))
+        menu.addItem(action(str("openDashboard", "Open dashboard…"), #selector(openDashboard)))
+        menu.addItem(action(str("refresh", "Refresh now"), #selector(refresh)))
+        menu.addItem(action(str("quit", "Quit Dipstick"), #selector(quit)))
+    }
+
+    private func str(_ key: String, _ fallback: String) -> String {
+        snapshot?.strings[key] ?? fallback
+    }
+
+    /// One window: a colour-coded dot, the window name, then the figure and the
+    /// recovery time on their own tab stops so the columns line up down the menu.
+    /// The dot carries the state as colour, the row still reads without it --
+    /// colour is never the only signal.
+    private func windowRow(_ win: Window) -> NSMenuItem {
+        let tint = colour(for: win.state)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: 168),
+                              NSTextTab(textAlignment: .left, location: 180)]
+
+        let line = NSMutableAttributedString()
+        line.append(NSAttributedString(string: "   ● ", attributes: [
+            .foregroundColor: tint,
+            .font: NSFont.systemFont(ofSize: 9)]))
+        let title = [win.pool, win.name].compactMap { $0 }.joined(separator: " · ")
+        line.append(NSAttributedString(string: title, attributes: [
+            .foregroundColor: NSColor.labelColor,
+            .font: NSFont.systemFont(ofSize: 12)]))
+        line.append(NSAttributedString(string: "\t\(Int(win.remaining.rounded()))%", attributes: [
+            .foregroundColor: NSColor.labelColor,
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)]))
+        var tail = win.resetsIn
+        if win.binds { tail += "  " + str("binds", "binds") }
+        else if win.imminent { tail += "  " + str("recovering", "recovering") }
+        line.append(NSAttributedString(string: "\t" + tail, attributes: [
+            .foregroundColor: win.binds ? tint : NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 11, weight: win.binds ? .semibold : .regular)]))
+        line.addAttribute(.paragraphStyle, value: paragraph,
+                          range: NSRange(location: 0, length: line.length))
+
+        let entry = NSMenuItem()
+        entry.attributedTitle = line
+        entry.isEnabled = false
+        return entry
+    }
+
+    private func noteRow(_ text: String, _ tint: NSColor) -> NSMenuItem {
+        let entry = NSMenuItem()
+        entry.attributedTitle = NSAttributedString(string: "   " + text, attributes: [
+            .foregroundColor: tint, .font: NSFont.systemFont(ofSize: 11)])
+        entry.isEnabled = false
+        return entry
     }
 
     private func headerLine(_ sub: Subscription) -> NSAttributedString {
         let title = NSMutableAttributedString(
             string: sub.sub,
-            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)])
+            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .bold),
+                         .foregroundColor: NSColor.labelColor])
         if sub.isMain {
             title.append(NSAttributedString(
                 string: "  MAIN",
-                attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .bold),
-                             .foregroundColor: NSColor.controlAccentColor]))
+                attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .heavy),
+                             .foregroundColor: NSColor.controlAccentColor,
+                             .kern: 0.6]))
         }
         title.append(NSAttributedString(
-            string: "  \(sub.account)",
+            string: "   \(sub.account)",
             attributes: [.font: NSFont.systemFont(ofSize: 10),
-                         .foregroundColor: NSColor.secondaryLabelColor]))
+                         .foregroundColor: NSColor.tertiaryLabelColor]))
         return title
     }
 
