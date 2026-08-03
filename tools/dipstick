@@ -1149,6 +1149,8 @@ def main(argv):
                     "running": L("codex {n}개 실행 중", "{n} codex processes running"),
                     "updated": L("갱신 {t}", "updated {t}"),
                     "noReading": L("관측값 없음", "no reading yet"),
+                    "subscriptions": L("구독", "subscriptions"),
+                    "runningSection": L("실행 중", "running"),
                     "notFound": L("dipstick CLI 를 찾을 수 없음", "dipstick CLI not found"),
                 },
             }, ensure_ascii=False, indent=2))

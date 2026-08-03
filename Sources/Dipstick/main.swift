@@ -7,6 +7,7 @@
 // never disagree about a number.
 
 import AppKit
+import SwiftUI
 
 // MARK: - Snapshot decoded from `dipstick --json`
 
@@ -127,24 +128,23 @@ func renderStatus(_ subs: [Subscription], appearance: NSAppearance?) -> NSImage 
 
     let total = columns.reduce(0) { $0 + $1.width } + gap * CGFloat(columns.count - 1)
     let image = NSImage(size: NSSize(width: ceil(total), height: height))
-    image.lockFocus()
-    // resolve labelColor against the menu bar's own appearance, not the app's
-    let previous = NSAppearance.current
-    if let appearance { NSAppearance.current = appearance }
-    var x: CGFloat = 0
-    for column in columns {
-        let nameX = x + (column.width - column.name.size().width) / 2
-        column.name.draw(at: NSPoint(x: nameX, y: 12))
+    let paint = {
+        var x: CGFloat = 0
+        for column in columns {
+            let nameX = x + (column.width - column.name.size().width) / 2
+            column.name.draw(at: NSPoint(x: nameX, y: 12))
 
-        let valueWidth = column.value.size().width
-        let blockWidth = valueWidth + dot + 4
-        let blockX = x + (column.width - blockWidth) / 2
-        column.tint.setFill()
-        NSBezierPath(ovalIn: NSRect(x: blockX, y: 5, width: dot, height: dot)).fill()
-        column.value.draw(at: NSPoint(x: blockX + dot + 4, y: 0))
-        x += column.width + gap
+            let blockWidth = column.value.size().width + dot + 4
+            let blockX = x + (column.width - blockWidth) / 2
+            column.tint.setFill()
+            NSBezierPath(ovalIn: NSRect(x: blockX, y: 5, width: dot, height: dot)).fill()
+            column.value.draw(at: NSPoint(x: blockX + dot + 4, y: 0))
+            x += column.width + gap
+        }
     }
-    NSAppearance.current = previous
+    image.lockFocus()
+    // resolve labelColor against the menu bar's appearance, not the app's
+    if let appearance { appearance.performAsCurrentDrawingAppearance(paint) } else { paint() }
     image.unlockFocus()
     image.isTemplate = false        // the state dots must keep their colour
     return image
@@ -203,14 +203,20 @@ enum CLI {
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    let popover: NSPopover = {
+        let p = NSPopover()
+        p.behavior = .transient          // click away to dismiss, like a menu
+        p.animates = false
+        return p
+    }()
     private var timer: Timer?
-    private var snapshot: Snapshot?
-    private var serverPort = 8787
+    var snapshot: Snapshot?
+    var serverPort = 8787
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        item.menu = NSMenu()
-        item.menu?.delegate = self
+        item.button?.target = self
+        item.button?.action = #selector(togglePanel)
         refresh()
         // Five minutes: the Claude endpoint rate-limits polling and the CLI caches
         // its response for the same interval, so anything faster only burns CPU.
@@ -224,8 +230,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let data = CLI.run(["--json"])
             let snap = data.flatMap { try? JSONDecoder().decode(Snapshot.self, from: $0) }
             DispatchQueue.main.async {
-                self?.snapshot = snap
-                self?.updateTitle()
+                guard let self else { return }
+                self.snapshot = snap
+                self.updateTitle()
+                if self.popover.isShown {
+                    self.popover.contentViewController?.view = self.makePanel()
+                }
             }
         }
     }
@@ -256,13 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: menu actions
 
-    @objc private func setMain(_ sender: NSMenuItem) {
-        guard let key = sender.representedObject as? String else { return }
-        CLI.run(["--set-main", key])
-        refresh()
-    }
-
-    @objc private func openDashboard() {
+    @objc func openDashboard() {
         guard let url = URL(string: "http://127.0.0.1:\(serverPort)/") else { return }
         // Start a server only if nothing answers; --serve is meant to be on demand.
         if !portIsOpen(serverPort), let path = CLI.path {
@@ -291,140 +295,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return ok
     }
 
-    @objc private func quit() { NSApp.terminate(nil) }
 }
 
-// MARK: - Menu
+// MARK: - Popover
 
-extension AppDelegate: NSMenuDelegate {
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-
-        guard let snap = snapshot else {
-            let why = CLI.path == nil
-                ? "dipstick CLI not found — install it to ~/.local/bin"
-                : "No reading yet"
-            menu.addItem(disabled(why))
-            menu.addItem(.separator())
-            menu.addItem(action("Refresh now", #selector(refresh)))
-            menu.addItem(action("Quit", #selector(quit)))
-            return
-        }
-
-        for sub in snap.subscriptions {
-            let header = NSMenuItem()
-            header.attributedTitle = headerLine(sub)
-            menu.addItem(header)
-
-            for win in sub.windows {
-                menu.addItem(windowRow(win))
-            }
-            if let reserve = sub.reserve, reserve.state != "GO" {
-                menu.addItem(noteRow("⚠ " + reserve.text, colour(for: reserve.state)))
-            }
-            if !sub.note.isEmpty { menu.addItem(noteRow(sub.note, .tertiaryLabelColor)) }
-
-            if sub.selectable {
-                let label = sub.isMain ? str("unsetMain", "Unset as main")
-                                       : str("setAsMain", "Set as main")
-                let pick = action("   " + label, #selector(setMain(_:)))
-                pick.representedObject = sub.isMain ? "auto" : sub.key
-                menu.addItem(pick)
-            }
-            menu.addItem(.separator())
-        }
-
-        let running = snap.runningCodex.reduce(0) { $0 + $1.count }
-        if running > 0 {
-            menu.addItem(noteRow(str("running", "{n} codex running")
-                .replacingOccurrences(of: "{n}", with: String(running)), .tertiaryLabelColor))
-        }
-        menu.addItem(noteRow(str("updated", "updated {t}")
-            .replacingOccurrences(of: "{t}", with: String(snap.takenAt.suffix(8))),
-            .tertiaryLabelColor))
-        menu.addItem(.separator())
-        menu.addItem(action(str("openDashboard", "Open dashboard…"), #selector(openDashboard)))
-        menu.addItem(action(str("refresh", "Refresh now"), #selector(refresh)))
-        menu.addItem(action(str("quit", "Quit Dipstick"), #selector(quit)))
+extension AppDelegate {
+    func makePanel() -> NSView {
+        let view = PanelView(
+            snapshot: snapshot,
+            cliMissing: CLI.path == nil,
+            onPick: { [weak self] key in
+                CLI.run(["--set-main", key])
+                self?.refresh()
+            },
+            onDashboard: { [weak self] in self?.openDashboard() },
+            onRefresh: { [weak self] in self?.refresh() },
+            onQuit: { NSApp.terminate(nil) })
+        return NSHostingView(rootView: view)
     }
 
-    private func str(_ key: String, _ fallback: String) -> String {
-        snapshot?.strings[key] ?? fallback
-    }
-
-    /// One window: a colour-coded dot, the window name, then the figure and the
-    /// recovery time on their own tab stops so the columns line up down the menu.
-    /// The dot carries the state as colour, the row still reads without it --
-    /// colour is never the only signal.
-    private func windowRow(_ win: Window) -> NSMenuItem {
-        let tint = colour(for: win.state)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: 168),
-                              NSTextTab(textAlignment: .left, location: 180)]
-
-        let line = NSMutableAttributedString()
-        line.append(NSAttributedString(string: "   ● ", attributes: [
-            .foregroundColor: tint,
-            .font: NSFont.systemFont(ofSize: 9)]))
-        let title = [win.pool, win.name].compactMap { $0 }.joined(separator: " · ")
-        line.append(NSAttributedString(string: title, attributes: [
-            .foregroundColor: NSColor.labelColor,
-            .font: NSFont.systemFont(ofSize: 12)]))
-        line.append(NSAttributedString(string: "\t\(Int(win.remaining.rounded()))%", attributes: [
-            .foregroundColor: NSColor.labelColor,
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)]))
-        var tail = win.resetsIn
-        if win.binds { tail += "  " + str("binds", "binds") }
-        else if win.imminent { tail += "  " + str("recovering", "recovering") }
-        line.append(NSAttributedString(string: "\t" + tail, attributes: [
-            .foregroundColor: win.binds ? tint : NSColor.secondaryLabelColor,
-            .font: NSFont.systemFont(ofSize: 11, weight: win.binds ? .semibold : .regular)]))
-        line.addAttribute(.paragraphStyle, value: paragraph,
-                          range: NSRange(location: 0, length: line.length))
-
-        let entry = NSMenuItem()
-        entry.attributedTitle = line
-        entry.isEnabled = false
-        return entry
-    }
-
-    private func noteRow(_ text: String, _ tint: NSColor) -> NSMenuItem {
-        let entry = NSMenuItem()
-        entry.attributedTitle = NSAttributedString(string: "   " + text, attributes: [
-            .foregroundColor: tint, .font: NSFont.systemFont(ofSize: 11)])
-        entry.isEnabled = false
-        return entry
-    }
-
-    private func headerLine(_ sub: Subscription) -> NSAttributedString {
-        let title = NSMutableAttributedString(
-            string: sub.sub,
-            attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .bold),
-                         .foregroundColor: NSColor.labelColor])
-        if sub.isMain {
-            title.append(NSAttributedString(
-                string: "  MAIN",
-                attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .heavy),
-                             .foregroundColor: NSColor.controlAccentColor,
-                             .kern: 0.6]))
-        }
-        title.append(NSAttributedString(
-            string: "   \(sub.account)",
-            attributes: [.font: NSFont.systemFont(ofSize: 10),
-                         .foregroundColor: NSColor.tertiaryLabelColor]))
-        return title
-    }
-
-    private func disabled(_ text: String) -> NSMenuItem {
-        let entry = NSMenuItem(title: text, action: nil, keyEquivalent: "")
-        entry.isEnabled = false
-        return entry
-    }
-
-    private func action(_ title: String, _ selector: Selector) -> NSMenuItem {
-        let entry = NSMenuItem(title: title, action: selector, keyEquivalent: "")
-        entry.target = self
-        return entry
+    @objc func togglePanel() {
+        if popover.isShown { return popover.performClose(nil) }
+        guard let button = item.button else { return }
+        popover.contentViewController = {
+            let controller = NSViewController()
+            controller.view = makePanel()
+            return controller
+        }()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        refresh()
     }
 }
 
