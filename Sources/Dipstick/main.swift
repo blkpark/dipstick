@@ -311,7 +311,12 @@ extension AppDelegate {
             onDashboard: { [weak self] in self?.openDashboard() },
             onRefresh: { [weak self] in self?.refresh() },
             onQuit: { NSApp.terminate(nil) })
-        return NSHostingView(rootView: view)
+        let hosting = NSHostingView(rootView: view)
+        // NSHostingView does not size a popover for you: without this the panel
+        // is clipped to the popover's default height.
+        hosting.frame.size = hosting.fittingSize
+        popover.contentSize = hosting.fittingSize
+        return hosting
     }
 
     @objc func togglePanel() {

@@ -177,6 +177,16 @@ struct PanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            header
+            scrollingBody
+            footer
+        }
+        .padding(14)
+        .frame(width: 340)
+    }
+
+    private var header: some View {
+        Group {
             HStack {
                 Image(systemName: "gauge.with.dots.needle.bottom.50percent")
                     .foregroundStyle(.secondary)
@@ -211,7 +221,15 @@ struct PanelView: View {
                 }
                 .padding(.top, 12)
             }
+        }
+    }
 
+    /// The list is the only part that can grow without bound -- four
+    /// subscriptions with several windows each already overflows a screen -- so
+    /// it scrolls while the gauge and the actions stay put.
+    private var scrollingBody: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 0) {
             if let snap = snapshot {
                 SectionHeader(title: strings["subscriptions"] ?? "subscriptions")
                 VStack(alignment: .leading, spacing: 10) {
@@ -223,7 +241,7 @@ struct PanelView: View {
                 let running = snap.runningCodex.reduce(0) { $0 + $1.count }
                 if running > 0 {
                     SectionHeader(title: strings["runningSection"] ?? "running")
-                    ForEach(Array(snap.runningCodex.enumerated()), id: \.offset) { _, proc in
+                    ForEach(Array(snap.runningCodex.prefix(4).enumerated()), id: \.offset) { _, proc in
                         HStack {
                             Text(proc.home.replacingOccurrences(
                                 of: NSHomeDirectory(), with: "~"))
@@ -237,8 +255,15 @@ struct PanelView: View {
                     }
                 }
             }
+            }
+        }
+        .frame(maxHeight: 400)
+        .scrollIndicators(.automatic)
+    }
 
-            Divider().padding(.top, 12).padding(.bottom, 8)
+    private var footer: some View {
+        VStack(spacing: 0) {
+            Divider().padding(.top, 10).padding(.bottom, 8)
             HStack(spacing: 14) {
                 Button(strings["openDashboard"] ?? "Open dashboard…", action: onDashboard)
                 Button(strings["refresh"] ?? "Refresh", action: onRefresh)
@@ -248,8 +273,6 @@ struct PanelView: View {
             .buttonStyle(.link)
             .font(.system(size: 11, weight: .medium))
         }
-        .padding(14)
-        .frame(width: 340)
     }
 }
 
