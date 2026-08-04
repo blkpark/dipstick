@@ -13,11 +13,15 @@ import SwiftUI
 // per element -- that is what made the earlier menu read as noise.
 
 extension Font {
-    static let dsSection = Font.system(size: 9.5, weight: .semibold).width(.expanded)
+    static let dsSection = Font.system(size: 9.5, weight: .medium).width(.expanded)
     static let dsLabel = Font.system(size: 12)
-    static let dsValue = Font.system(size: 12, weight: .semibold).monospacedDigit()
-    static let dsTitle = Font.system(size: 13, weight: .bold)
+    /// SF Mono for every figure: fixed advance widths keep the percentage and the
+    /// recovery columns from shifting as the numbers change.
+    static let dsValue = Font.system(size: 11.5, weight: .regular, design: .monospaced)
+    static let dsTitle = Font.system(size: 13, weight: .semibold)
     static let dsCaption = Font.system(size: 10.5)
+    static let dsGauge = Font.system(size: 17, weight: .medium, design: .monospaced)
+    static let dsMono = Font.system(size: 10, weight: .regular, design: .monospaced)
 }
 
 func stateColor(_ state: String) -> Color {
@@ -66,7 +70,7 @@ struct Gauge: View {
                 .rotationEffect(.degrees(-90))
             VStack(spacing: 0) {
                 Text("\(Int(remaining.rounded()))%")
-                    .font(.system(size: 17, weight: .bold).monospacedDigit())
+                    .font(.dsGauge)
                 Text(caption)
                     .font(.system(size: 8.5))
                     .foregroundStyle(.secondary)
@@ -91,7 +95,7 @@ struct WindowRow: View {
                 .lineLimit(1)
             if window.binds {
                 Text(window.bindsLabel)
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(stateColor(window.state))
                     .padding(.horizontal, 4).padding(.vertical, 1)
                     .background(stateColor(window.state).opacity(0.14), in: Capsule())
@@ -120,7 +124,7 @@ struct SubscriptionBlock: View {
                 Text(sub.sub).font(.dsTitle)
                 if sub.isMain {
                     Text("MAIN")
-                        .font(.system(size: 8.5, weight: .heavy)).kerning(0.5)
+                        .font(.system(size: 8.5, weight: .semibold)).kerning(0.5)
                         .foregroundStyle(Color.accentColor)
                         .padding(.horizontal, 4).padding(.vertical, 1)
                         .overlay(RoundedRectangle(cornerRadius: 3)
@@ -150,7 +154,7 @@ struct SubscriptionBlock: View {
                     onPick(sub.isMain ? "auto" : sub.key)
                 }
                 .buttonStyle(.link)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11))
                 .padding(.top, 1)
             }
         }
@@ -194,7 +198,7 @@ struct PanelView: View {
                 Spacer()
                 if let snap = snapshot {
                     Text(String(snap.takenAt.suffix(8)))
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(.dsMono)
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -211,7 +215,7 @@ struct PanelView: View {
                 HStack(spacing: 14) {
                     Gauge(remaining: win.remaining, state: win.state, caption: win.name)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(lead.sub).font(.system(size: 13, weight: .bold))
+                        Text(lead.sub).font(.system(size: 13, weight: .semibold))
                         Text(win.why)
                             .font(.dsCaption)
                             .foregroundStyle(.secondary)
@@ -245,7 +249,7 @@ struct PanelView: View {
                         HStack {
                             Text(proc.home.replacingOccurrences(
                                 of: NSHomeDirectory(), with: "~"))
-                                .font(.system(size: 10))
+                                .font(.dsMono)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1).truncationMode(.middle)
                             Spacer(minLength: 8)
@@ -271,7 +275,7 @@ struct PanelView: View {
                 Button(strings["quit"] ?? "Quit", action: onQuit)
             }
             .buttonStyle(.link)
-            .font(.system(size: 11, weight: .medium))
+            .font(.system(size: 11))
         }
     }
 }

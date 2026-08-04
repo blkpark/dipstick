@@ -77,8 +77,12 @@ func shortName(_ sub: String) -> String {
 /// rides on a small filled dot instead. Drawing to an image rather than hosting a
 /// custom view keeps the normal button behaviour: one click still opens the menu.
 func renderStatus(_ subs: [Subscription], appearance: NSAppearance?) -> NSImage {
-    let nameFont = NSFont.systemFont(ofSize: 8.5, weight: .semibold)
-    let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+    // Condensed label, SF Mono figure. The condensed face buys menu bar width back
+    // and the monospaced digits stop the readout jittering as values change --
+    // together they read as instrumentation rather than as a sentence. Light
+    // weights: bold text beside the system's own readouts looks like shouting.
+    let nameFont = NSFont.systemFont(ofSize: 9, weight: .regular, width: .condensed)
+    let valueFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
     let gap: CGFloat = 11, height: CGFloat = 22
 
     struct Column { let name: NSAttributedString; let value: NSAttributedString; let width: CGFloat }
