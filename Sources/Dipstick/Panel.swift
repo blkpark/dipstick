@@ -80,36 +80,75 @@ struct Gauge: View {
     }
 }
 
-/// One window: name left, figure and recovery right, columns aligned down the
-/// panel. The dot carries state as colour so the row still reads without it.
-struct WindowRow: View {
+/// One window as a tile: title and state chip on top, the percentage as the
+/// hero figure, a thin progress track, and the reset time as a footnote. A row
+/// of text buried the number; the tile makes it the first thing read.
+struct WindowCard: View {
     let window: Window
+    let strings: [String: String]
+
+    private var tint: Color { stateColor(window.state) }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(stateColor(window.state))
-                .frame(width: 6, height: 6)
-            Text([window.pool, window.name].compactMap { $0 }.joined(separator: " · "))
-                .font(.dsLabel)
-                .lineLimit(1)
-            if window.binds {
-                Text(window.bindsLabel)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(stateColor(window.state))
-                    .padding(.horizontal, 4).padding(.vertical, 1)
-                    .background(stateColor(window.state).opacity(0.14), in: Capsule())
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 6) {
+                Text([window.pool, window.name].compactMap { $0 }
+                        .joined(separator: " · ").uppercased())
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .kerning(0.4)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2, reservesSpace: true)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 4)
+                Text(window.state)
+                    .font(.system(size: 8, weight: .bold))
+                    .kerning(0.4)
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(tint.opacity(0.16), in: Capsule())
             }
-            Spacer(minLength: 8)
-            Text("\(Int(window.remaining.rounded()))%")
-                .font(.dsValue)
-            Text(window.resetsIn)
-                .font(.dsCaption)
-                .foregroundStyle(.secondary)
-                .frame(width: 78, alignment: .trailing)
-                .lineLimit(1)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("\(Int(window.remaining.rounded()))")
+                    .font(.system(size: 26, weight: .medium, design: .monospaced))
+                Text("%")
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 2)
+                Text(strings["remaining"] ?? "Remaining")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.15))
+                    Capsule().fill(tint)
+                        .frame(width: max(3, geo.size.width * window.remaining / 100))
+                }
+            }
+            .frame(height: 3)
+            HStack(spacing: 4) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+                Text(window.resetsIn)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                if window.binds {
+                    Spacer(minLength: 2)
+                    Text(strings["binds"] ?? "binds")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(tint)
+                }
+            }
         }
-        .padding(.vertical, 2)
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(Color.primary.opacity(0.045)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(Color.primary.opacity(0.07), lineWidth: 1))
     }
 }
 
@@ -119,7 +158,7 @@ struct SubscriptionBlock: View {
     let onPick: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Text(sub.sub).font(.dsTitle)
                 if sub.isMain {
@@ -136,9 +175,14 @@ struct SubscriptionBlock: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
-            ForEach(Array(sub.windows.enumerated()), id: \.offset) { _, win in
-                WindowRow(window: win)
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8),
+                                GridItem(.flexible(), spacing: 8)],
+                      alignment: .leading, spacing: 8) {
+                ForEach(Array(sub.windows.enumerated()), id: \.offset) { _, win in
+                    WindowCard(window: win, strings: strings)
+                }
             }
+            .padding(.top, 2)
             if let reserve = sub.reserve, reserve.state != "GO" {
                 Label(reserve.text, systemImage: "exclamationmark.triangle.fill")
                     .font(.dsCaption)
