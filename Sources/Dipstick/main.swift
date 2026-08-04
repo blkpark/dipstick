@@ -245,14 +245,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         // Main first, then whatever is tightest: the readings most likely to stop
-        // work. Everything else is one click away in the menu.
+        // work. Every subscription with a reading gets a column — a fourth one
+        // costs ~35pt, and the cap of three silently hid Claude, which is exactly
+        // the pool whose floor matters most here.
         let withData = snap.subscriptions.filter { !$0.windows.isEmpty }
         let ordered = withData.filter(\.isMain)
             + withData.filter { !$0.isMain }
                 .sorted { (bindingWindow($0)?.remaining ?? 101) < (bindingWindow($1)?.remaining ?? 101) }
         button.title = ""
-        button.image = renderStatus(Array(ordered.prefix(3)),
-                                    appearance: button.effectiveAppearance)
+        button.image = renderStatus(ordered, appearance: button.effectiveAppearance)
         button.toolTip = ordered.compactMap { sub in
             bindingWindow(sub).map { "\(sub.sub) · \($0.name) \(Int($0.remaining.rounded()))% · \($0.why)" }
         }.joined(separator: "\n")
