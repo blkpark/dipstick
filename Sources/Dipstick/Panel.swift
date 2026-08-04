@@ -242,8 +242,18 @@ struct PanelView: View {
     /// The list is the only part that can grow without bound -- four
     /// subscriptions with several windows each already overflows a screen -- so
     /// it scrolls while the gauge and the actions stay put.
+    /// Fits the content when it is short and scrolls only when it is not — a
+    /// greedy ScrollView otherwise pads the panel to its cap with empty space.
     private var scrollingBody: some View {
-        ScrollView(.vertical) {
+        ViewThatFits(in: .vertical) {
+            listBody
+            ScrollView(.vertical) { listBody }
+        }
+        .frame(maxHeight: 400)
+        .scrollIndicators(.automatic)
+    }
+
+    private var listBody: some View {
             VStack(alignment: .leading, spacing: 0) {
             if let snap = snapshot {
                 SectionHeader(title: strings["subscriptions"] ?? "subscriptions")
@@ -271,9 +281,6 @@ struct PanelView: View {
                 }
             }
             }
-        }
-        .frame(maxHeight: 400)
-        .scrollIndicators(.automatic)
     }
 
     private var footer: some View {
