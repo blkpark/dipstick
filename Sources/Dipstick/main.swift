@@ -97,12 +97,19 @@ func renderStatus(_ subs: [Subscription], pinned: Bool, appearance: NSAppearance
         // One figure per column. The dot and the countdown that used to sit here
         // made three things compete in 22 points; the panel has room for both.
         // Pinned mode means this one pool takes every launch; the label says so
-        // right where the figure is read, instead of only inside the panel.
-        let title = shortName(sub.sub) + (pinned && sub.isMain ? "·PIN" : "")
-        let name = NSAttributedString(string: title, attributes: [
+        // right where the figure is read, instead of only inside the panel. The
+        // PIN part carries the accent colour so it reads as a mode marker rather
+        // than as part of the subscription's name.
+        let name = NSMutableAttributedString(string: shortName(sub.sub), attributes: [
             .font: nameFont,
             .foregroundColor: NSColor.labelColor,
             .kern: 0.6])
+        if pinned && sub.isMain {
+            name.append(NSAttributedString(string: " PIN", attributes: [
+                .font: NSFont.systemFont(ofSize: 8, weight: .bold),
+                .foregroundColor: NSColor.controlAccentColor,
+                .kern: 0.6]))
+        }
         // Colour is reserved for trouble. TIGHT is still workable, so only LOW and
         // BLOCKED break monochrome -- a tint in the menu bar then always means
         // something needs attention rather than being decoration.
