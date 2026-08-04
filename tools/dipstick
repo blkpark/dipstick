@@ -129,6 +129,7 @@ def window_label(minutes):
 AGY_WINDOW = {"weekly": lambda: L("7일 창", "7-day window"),
               "5h": lambda: L("5시간 창", "5-hour window"),
               "daily": lambda: L("1일 창", "1-day window")}
+AGY_MINUTES = {"weekly": 10080, "5h": 300, "daily": 1440}
 AGY_GROUP = {"Gemini Models": lambda: L("Gemini 계열", "Gemini models"),
              "Claude and GPT models": lambda: L("Claude·GPT 계열", "Claude and GPT models")}
 
@@ -178,6 +179,22 @@ def fmt_reset(dt):
     return when, fmt_left((dt - now).total_seconds())
 
 
+def pace_surplus(remaining, minutes, resets):
+    """%p above (+) or below (-) the sustainable line.
+
+    The line is where the reading would sit if the window were being spent at a
+    perfectly even rate: time-left fraction of the window. 94% right after a
+    weekly reset is level pace, not headroom; 40% the day before one is plenty.
+    """
+    if not minutes or not resets:
+        return None
+    left_h = hours_until(resets)
+    if left_h <= 0:
+        return None
+    line = min(100.0, 100.0 * left_h / (minutes / 60.0))
+    return remaining - line
+
+
 def tier(remaining_pct):
     for floor, tag, colour in TIERS:
         if remaining_pct >= floor:
@@ -185,15 +202,27 @@ def tier(remaining_pct):
     return "BLOCKED", "#b3382f"
 
 
-def verdict(remaining_pct, hours_left, stale_hours=0.0, live=0, imminent=False):
+def verdict(remaining_pct, hours_left, stale_hours=0.0, live=0, imminent=False, surplus=None):
     left = fmt_left(hours_left * 3600)
     if remaining_pct is None:
         return "UNKNOWN", L("관측값 없음 — 수동 확인", "no reading — check manually")
     if stale_hours > STALE_HOURS:
         return "STALE", L(f"마지막 관측 {stale_hours:.0f}h 전 — 실제 잔량은 더 낮을 수 있음",
                           f"last seen {stale_hours:.0f}h ago — the real figure may be lower")
-    tag, _ = tier(remaining_pct)
     busy = L(f" · 같은 풀에 실행 중 {live}개", f" · {live} running on this pool") if live else ""
+    if surplus is not None and remaining_pct > 0.01 and not imminent:
+        # Graded against pace, not against a fixed percentage: how far the reading
+        # sits from where an even spend would have it, so a fresh window never
+        # reads as abundance and a nearly-over one never reads as famine.
+        if surplus >= 10:
+            return "GO", L(f"페이스 여유 {surplus:+.0f}%p{busy}",
+                           f"ahead of pace {surplus:+.0f}%p{busy}")
+        if surplus >= -10:
+            return "TIGHT", L(f"정속 부근 {surplus:+.0f}%p — 긴 작업 주의{busy}",
+                              f"about level pace {surplus:+.0f}%p — mind long jobs{busy}")
+        return "LOW", L(f"페이스 초과 {surplus:+.0f}%p — {left} 회복까지 신규 작업 보류{busy}",
+                        f"over pace {surplus:+.0f}%p — hold new work until it recovers {left}{busy}")
+    tag, _ = tier(remaining_pct)
     if imminent and tag != "GO":
         return tag, L(f"회복 임박 — {left} 풀린다. 지금 시작할 작업엔 제약 아님{busy}",
                       f"recovers {left} — not a constraint for work you start now{busy}")
@@ -491,10 +520,11 @@ def codex_rows(db, live_total):
                 continue
             remaining = 100 - float(w["used_percent"])
             resets = datetime.datetime.fromtimestamp(w["resets_at"]) if w.get("resets_at") else None
+            sur = pace_surplus(remaining, w["window_minutes"], resets)
             wins.append({"name": window_label(w["window_minutes"]), "remaining": remaining,
-                         "resets": resets,
+                         "minutes": w["window_minutes"], "resets": resets, "surplus": sur,
                          "verdict": verdict(remaining, hours_until(resets) if resets else 0,
-                                            stale, live_total, is_imminent(resets))})
+                                            stale, live_total, is_imminent(resets), sur)})
         rows.append({"sub": sub_label("Codex", plan), "account": emails.get(plan, "계정 미상"),
                      "pool": None, "windows": wins,
                      "note": L(f"관측 {obs:%m-%d %H:%M} ({stale:.0f}h 전)", f"seen {obs:%m-%d %H:%M} ({stale:.0f}h ago)")})
@@ -561,9 +591,11 @@ def claude_rows(db):
             continue
         remaining = 100 - float(w["utilization"])
         resets = datetime.datetime.fromisoformat(w["resets_at"]).astimezone().replace(tzinfo=None)
-        wins.append({"name": window_label(mins), "remaining": remaining, "resets": resets,
+        sur = pace_surplus(remaining, mins, resets)
+        wins.append({"name": window_label(mins), "remaining": remaining,
+                     "minutes": mins, "resets": resets, "surplus": sur,
                      "verdict": verdict(remaining, hours_until(resets),
-                                        imminent=is_imminent(resets))})
+                                        imminent=is_imminent(resets), surplus=sur)})
     # The limits array carries what the top-level fields do not: per-model weekly
     # caps ("weekly_scoped" with scope.model, e.g. Fable on Max plans). session and
     # weekly_all just mirror five_hour/seven_day, so only scoped entries are read.
@@ -577,9 +609,12 @@ def claude_rows(db):
         group = lim.get("group") or ""
         name = window_label(10080) if group == "weekly" else (
             window_label(300) if group == "session" else group or "?")
-        wins.append({"name": f"{model} · {name}", "remaining": remaining, "resets": resets,
+        mins2 = 10080 if group == "weekly" else 300 if group == "session" else None
+        sur = pace_surplus(remaining, mins2, resets)
+        wins.append({"name": f"{model} · {name}", "remaining": remaining,
+                     "minutes": mins2, "resets": resets, "surplus": sur,
                      "verdict": verdict(remaining, hours_until(resets) if resets else 0,
-                                        imminent=is_imminent(resets))})
+                                        imminent=is_imminent(resets), surplus=sur)})
     return [dict(base, windows=wins, note=note)]
 
 
@@ -624,10 +659,13 @@ def agy_rows():
             resets = (datetime.datetime.fromisoformat(b["resetTime"].replace("Z", "+00:00"))
                       .astimezone().replace(tzinfo=None)) if b.get("resetTime") else None
             label = AGY_WINDOW.get(b.get("window"))
+            mins3 = AGY_MINUTES.get(b.get("window"))
+            sur = pace_surplus(remaining, mins3, resets)
             wins.append({"name": label() if label else b.get("displayName", "?"),
-                         "remaining": remaining, "resets": resets,
+                         "remaining": remaining, "minutes": mins3, "resets": resets,
+                         "surplus": sur,
                          "verdict": verdict(remaining, hours_until(resets) if resets else 0,
-                                            imminent=is_imminent(resets))})
+                                            imminent=is_imminent(resets), surplus=sur)})
         gname = AGY_GROUP.get(g.get("displayName"))
         rows.append(dict(base, pool=gname() if gname else g.get("displayName"),
                          windows=wins, note=""))
@@ -674,13 +712,66 @@ def group_by_subscription(rows, main=""):
     return sorted(out, key=key)
 
 
-def main_launch_cmd(db, rows):
-    """(command_prefix, error, warning).
+MAIN_BONUS = 10.0    # %p of stickiness: the main keeps the launch unless clearly worse
 
-    Naming a subscription as main is an explicit override of its reserve floor,
-    so it launches -- but never silently: the caller prints the warning.
+
+def launch_prefix(sub):
+    if sub.startswith("Claude"):
+        return "claude --permission-mode bypassPermissions", ""
+    home = codex_home_for(sub.split()[-1].lower())
+    if not home:
+        return None, L(f"{sub}: codex 홈을 못 찾음", f"{sub}: no codex home found")
+    return f'env CODEX_HOME="{home}" codex', ""
+
+
+def sub_score(group):
+    """Worst pace surplus across the subscription's lasting windows."""
+    wins = binding_windows([w for r in group for w in r["windows"]])
+    vals = [w["surplus"] for w in wins if w.get("surplus") is not None]
+    if vals:
+        return min(vals)
+    rem = [w["remaining"] for w in wins]
+    return (min(rem) - 70.0) if rem else None    # no reset clock: rough proxy
+
+
+def pick_launch(db, rows):
+    """(sub, why). Which subscription a new launch should burn.
+
+    pinned: always the main -- one subscription takes everything.
+    weighted: the best pace among subscriptions that are free to burn. A reserve
+    floor means "kept for its own use", so those never enter unless they ARE the
+    main; naming one as main is the explicit opt-in. The main gets MAIN_BONUS of
+    stickiness so a marginal difference never flips the account mid-day.
     """
-    sub = get_setting(db, "main")
+    main = get_setting(db, "main")
+    mode = get_setting(db, "main_mode", "weighted")
+    if mode == "pinned" or not main:
+        return (main or None,
+                L("고정 모드", "pinned") if main else
+                L("메인 미지정 — --set-main 으로 정한다", "no main set — choose one with --set-main"))
+    best, best_score = None, None
+    for sub, _, group in group_by_subscription(rows, main):
+        if sub.startswith("Antigravity"):
+            continue                               # role-fixed, never a launch target
+        if reserve_floor(sub) is not None and sub != main:
+            continue                               # reserved pools need the explicit opt-in
+        score = sub_score(group)
+        if score is None:
+            continue
+        if sub == main:
+            score += MAIN_BONUS
+        if best_score is None or score > best_score:
+            best, best_score = sub, score
+    if best is None:
+        return main, L("후보 관측값 없음 — 메인 사용", "no candidate readings — using main")
+    tag = (L("가중 선택", "weighted pick") if best == main
+           else L(f"가중 선택 — 메인({main}) 대신", f"weighted pick — over main ({main})"))
+    return best, tag
+
+
+def main_launch_cmd(db, rows):
+    """(command_prefix, error, warning). Empty error means safe to launch."""
+    sub, _why = pick_launch(db, rows)
     if not sub:
         return None, L("메인 미지정 — --set-main 으로 정한다",
                        "no main set — choose one with --set-main"), ""
@@ -689,18 +780,15 @@ def main_launch_cmd(db, rows):
     warn = ""
     if floor is not None:
         if not wins:
-            return None, f"{sub}: 관측값 없어 하한 {floor:.0f}% 확인 불가 — BLOCKED", ""
+            return None, L(f"{sub}: 관측값 없어 하한 {floor:.0f}% 확인 불가 — BLOCKED",
+                           f"{sub}: no reading, cannot check the {floor:.0f}% floor — BLOCKED"), ""
         low = min(w["remaining"] for w in wins)
         if low < floor:
-            # surfaced on the page, not here: this command runs inside a command
-            # substitution where stderr is swallowed by the launch line
             warn = f"{sub} {low:.0f}% < {floor:.0f}%"
-    if sub.startswith("Claude"):
-        return "claude --permission-mode bypassPermissions", "", warn
-    home = codex_home_for(sub.split()[-1].lower())
-    if not home:
-        return None, L(f"{sub}: codex 홈을 못 찾음", f"{sub}: no codex home found"), ""
-    return f'env CODEX_HOME="{home}" codex', "", warn
+    prefix, err = launch_prefix(sub)
+    if err:
+        return None, err, ""
+    return prefix, "", warn
 
 
 # --------------------------------------------------------------- rendering
@@ -748,8 +836,12 @@ def vendor_icon(sub):
 
 def render_text(db, rows, consumers):
     main = get_setting(db, "main")
+    mode = get_setting(db, "main_mode", "weighted")
+    pick, why = pick_launch(db, rows)
     print(f"== lane dispatch gauge  {now:%Y-%m-%d %H:%M} ==")
-    print(L("   메인: ", "   main: ") + (main or L("미지정 (문서 기본 순서)", "unset (document default)")) + "\n")
+    print(L("   메인: ", "   main: ") + (main or L("미지정", "unset"))
+          + f"  ·  {L('모드', 'mode')}: " + (L("무조건 메인", "pinned") if mode == "pinned" else L("가중", "weighted")))
+    print(L("   다음 발사: ", "   next launch: ") + (pick or "?") + f"  ({why})\n")
     for sub, account, group in group_by_subscription(rows, main):
         print(f"┌ {sub}   ({account}){(L('   ★ 메인', '   * MAIN') if sub == main else '')}")
         pol = policy_of(sub)
@@ -765,7 +857,9 @@ def render_text(db, rows, consumers):
             for w in r["windows"]:
                 state, why = w["verdict"]
                 rate = burn_rate(db, sub, w["name"])
+                sur = w.get("surplus")
                 print(f"    {w['name']}: " + L("잔량 ", "left ") + f"{w['remaining']:.0f}%"
+                      + (f" ({sur:+.0f}%p)" if sur is not None else "")
                       + (L("  [회복 임박]", "  [recovering]") if is_imminent(w.get("resets"))
                          else L("  [제약]", "  [binds]") if w is bind and w["verdict"][0] != "GO" else "")
                       + (L(f"  (소모 {rate:.1f}%p/h)", f"  (burn {rate:.1f}%p/h)") if rate else ""))
@@ -825,6 +919,7 @@ h1{font-size:14px;font-weight:700;margin:0}
 .win-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12px}
 .win-name{color:var(--dim)}
 .pct{font-size:15px;font-weight:700;color:var(--c)}
+.sur{font-size:10px;font-weight:600;color:var(--dim);margin-left:4px}
 .resetrow{display:flex;align-items:baseline;gap:6px;margin-top:5px;padding:4px 7px;
  border-radius:5px;background:var(--track);font-size:12px}
 .resetrow.soon{background:color-mix(in srgb,var(--c) 14%,transparent)}
@@ -851,6 +946,8 @@ h1{font-size:14px;font-weight:700;margin:0}
  background:color-mix(in srgb,var(--c) 10%,transparent)}
 .note{font-size:11px;color:var(--dim);margin-top:8px}
 form.pick{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line)}
+form.modesw{display:inline;margin-left:10px}
+.stamp b{color:var(--fg)}
 button{font:inherit;font-size:11px;font-weight:600;cursor:pointer;padding:6px 12px;
  border-radius:6px;border:1px solid var(--line);background:var(--surface);color:var(--fg);
  min-height:32px}
@@ -921,11 +1018,25 @@ def render_html(db, rows, consumers, path=None, interactive=False):
                        "your own use of this plan may stop first"))
                + '</span></span>') if over else ""
 
+    mode = get_setting(db, "main_mode", "weighted")
+    pick, pick_why = pick_launch(db, rows)
+    modesw = ""
+    if interactive:
+        other = "pinned" if mode == "weighted" else "weighted"
+        label = (L("무조건 메인", "Pinned") if mode == "weighted"
+                 else L("가중으로", "Weighted"))
+        modesw = (f'<form class="modesw" method="post" action="/mode">'
+                  f'<input type="hidden" name="mode" value="{other}">'
+                  f'<button type="submit" title="{esc(L("발사 구독 선택 방식 전환", "toggle launch selection"))}">'
+                  f'{label}</button></form>')
     p = [f'<header><h1>lane dispatch gauge</h1>'
          f'<span class="stamp">{now:%Y-%m-%d %H:%M} · '
          + L("메인 ", "main ")
-         + f'{esc(main or L("미지정 (문서 기본 순서)", "unset (document default)"))}</span>'
-         + langsw + warnbar
+         + f'{esc(main or L("미지정", "unset"))}'
+         + (" · " + (L("무조건 메인", "pinned") if mode == "pinned" else L("가중", "weighted")))
+         + (f' · {L("다음 발사", "next")}: <b>{esc(pick)}</b>' if pick else "")
+         + '</span>'
+         + modesw + langsw + warnbar
          + f'<span class="headline status" data-s="{worst}">{icon(worst)}'
            f'<span><span class="tag">{worst}</span> {esc(worst_text)}</span></span></header>'
            f'<div class="wrap"><div class="grid">']
@@ -1055,6 +1166,16 @@ def serve(port):
                 db.close()
 
         def do_POST(self):
+            if self.path == "/mode":
+                n = int(self.headers.get("Content-Length") or 0)
+                want = (urllib.parse.parse_qs(self.rfile.read(n).decode()).get("mode") or [""])[0]
+                db = connect()
+                try:
+                    if want in ("pinned", "weighted"):
+                        set_setting(db, "main_mode", want)
+                finally:
+                    db.close()
+                return self._send(303, b"", "text/plain", {"Location": "/"})
             if self.path != "/main":
                 return self._send(404, "not found", "text/plain; charset=utf-8")
             n = int(self.headers.get("Content-Length") or 0)
@@ -1114,6 +1235,19 @@ def main(argv):
             print(L(f"메인 = {hit}", f"main = {hit}"))
             return 0
 
+        if "--main-mode" in args:
+            i = args.index("--main-mode")
+            want = args[i + 1] if len(args) > i + 1 else ""
+            if want not in ("pinned", "weighted"):
+                cur = get_setting(db, "main_mode", "weighted")
+                print(f"main-mode = {cur}  (사용: --main-mode pinned|weighted)")
+                return 0
+            set_setting(db, "main_mode", want)
+            print(L(f"main-mode = {want}" + (" — 한 구독만 태운다" if want == "pinned"
+                                             else " — 페이스 가중 선택"),
+                    f"main-mode = {want}"))
+            return 0
+
         if "--main-cmd" in args:
             rows, _ = collect(db)
             cmd, err, warn = main_launch_cmd(db, rows)
@@ -1132,9 +1266,12 @@ def main(argv):
         rows, consumers = collect(db)
         if "--json" in args:
             main = get_setting(db, "main")
+            pick, pick_why = pick_launch(db, rows)
             print(json.dumps({
                 "takenAt": now.isoformat(timespec="seconds"),
                 "main": main,
+                "mainMode": get_setting(db, "main_mode", "weighted"),
+                "nextLaunch": pick, "nextLaunchWhy": pick_why,
                 "subscriptions": [
                     {"sub": sub, "key": sub_key(sub), "account": account,
                      "isMain": sub == main,
@@ -1144,6 +1281,7 @@ def main(argv):
                      "windows": [
                          {"name": w["name"], "pool": r.get("pool"),
                           "remaining": round(w["remaining"], 1),
+                          "surplus": round(w["surplus"], 1) if w.get("surplus") is not None else None,
                           "state": w["verdict"][0], "why": w["verdict"][1],
                           "resetsAt": w["resets"].isoformat() if w["resets"] else None,
                           "resetsIn": (fmt_left((w["resets"] - now).total_seconds())

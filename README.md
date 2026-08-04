@@ -101,6 +101,24 @@ through it and says so on the page.
 **`policy`** is your own note per subscription (a rank, a rule, whatever order you
 work by). dipstick only displays it; it does not act on it.
 
+## Pace, and how the launch target is chosen
+
+Every reading also shows its **pace surplus**: how far it sits from where a
+perfectly even spend would have it (`94% (+4)` — the window just reset, so 94%
+is level pace, not headroom; 40% the day before a reset is plenty). Verdicts are
+graded against this surplus, not against fixed percentages.
+
+`--main-cmd` picks the subscription a new launch should burn, in one of two modes
+(`--main-mode`, or the toggle in the web header):
+
+- **weighted** (default) — best pace among subscriptions that are free to burn,
+  with the main getting 10%p of stickiness so a marginal difference never flips
+  the account mid-day. Pools with a `reserve` floor are *kept for their own use*
+  and never enter the pick unless you named one as main — that is the opt-in.
+- **pinned** — always the main. One subscription takes everything.
+
+Either way it only answers "which one, right now". It still launches nothing.
+
 ## What it doesn't do
 
 It doesn't launch anything, queue anything, or switch subscriptions for you. It
