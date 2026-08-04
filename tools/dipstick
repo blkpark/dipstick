@@ -365,16 +365,19 @@ def burn_rate(db, sub, window, hours=48):
         "SELECT taken_at, remaining FROM samples WHERE sub=? AND window=? "
         "AND taken_at >= datetime('now', ?) ORDER BY taken_at",
         (sub, window, f"-{hours} hours")).fetchall()
-    spent = elapsed = 0.0
-    for (t0, v0), (t1, v1) in zip(rows, rows[1:]):
-        if v1 > v0:
-            continue
-        dt = (datetime.datetime.fromisoformat(t1)
-              - datetime.datetime.fromisoformat(t0)).total_seconds() / 3600
-        if dt > 0:
+    if len(rows) < 2:
+        return None
+    spent = 0.0
+    for (_, v0), (_, v1) in zip(rows, rows[1:]):
+        if v1 < v0:
             spent += v0 - v1
-            elapsed += dt
-    return spent / elapsed if elapsed >= MIN_SPAN_H else None
+    # Divide by the whole observed span, idle stretches included. Dividing by the
+    # falling intervals alone looked right but overstated wildly: dense sampling
+    # puts each fall in a seconds-long interval, and a day of reset cycles then
+    # reads as hundreds of %p per hour.
+    span = (datetime.datetime.fromisoformat(rows[-1][0])
+            - datetime.datetime.fromisoformat(rows[0][0])).total_seconds() / 3600
+    return spent / span if span >= MIN_SPAN_H else None
 
 
 # -------------------------------------------------------------- collectors
@@ -560,6 +563,22 @@ def claude_rows(db):
         resets = datetime.datetime.fromisoformat(w["resets_at"]).astimezone().replace(tzinfo=None)
         wins.append({"name": window_label(mins), "remaining": remaining, "resets": resets,
                      "verdict": verdict(remaining, hours_until(resets),
+                                        imminent=is_imminent(resets))})
+    # The limits array carries what the top-level fields do not: per-model weekly
+    # caps ("weekly_scoped" with scope.model, e.g. Fable on Max plans). session and
+    # weekly_all just mirror five_hour/seven_day, so only scoped entries are read.
+    for lim in body.get("limits") or []:
+        model = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+        if not model or lim.get("percent") is None:
+            continue
+        remaining = 100 - float(lim["percent"])
+        resets = (datetime.datetime.fromisoformat(lim["resets_at"]).astimezone()
+                  .replace(tzinfo=None)) if lim.get("resets_at") else None
+        group = lim.get("group") or ""
+        name = window_label(10080) if group == "weekly" else (
+            window_label(300) if group == "session" else group or "?")
+        wins.append({"name": f"{model} · {name}", "remaining": remaining, "resets": resets,
+                     "verdict": verdict(remaining, hours_until(resets) if resets else 0,
                                         imminent=is_imminent(resets))})
     return [dict(base, windows=wins, note=note)]
 
