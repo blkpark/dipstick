@@ -79,7 +79,7 @@ func shortName(_ sub: String) -> String {
 /// label colour, which macOS flips for a light or dark menu bar, and the state
 /// rides on a small filled dot instead. Drawing to an image rather than hosting a
 /// custom view keeps the normal button behaviour: one click still opens the menu.
-func renderStatus(_ subs: [Subscription], appearance: NSAppearance?) -> NSImage {
+func renderStatus(_ subs: [Subscription], pinned: Bool, appearance: NSAppearance?) -> NSImage {
     // Three variants rendered side by side against the system readouts settled
     // this: the plain sans at semibold matches them exactly, where SF Mono's
     // mechanical glyphs read as heavier than they are and a condensed regular
@@ -96,7 +96,10 @@ func renderStatus(_ subs: [Subscription], appearance: NSAppearance?) -> NSImage 
         guard let win = bindingWindow(sub) else { continue }
         // One figure per column. The dot and the countdown that used to sit here
         // made three things compete in 22 points; the panel has room for both.
-        let name = NSAttributedString(string: shortName(sub.sub), attributes: [
+        // Pinned mode means this one pool takes every launch; the label says so
+        // right where the figure is read, instead of only inside the panel.
+        let title = shortName(sub.sub) + (pinned && sub.isMain ? "·PIN" : "")
+        let name = NSAttributedString(string: title, attributes: [
             .font: nameFont,
             .foregroundColor: NSColor.labelColor,
             .kern: 0.6])
@@ -256,7 +259,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             + withData.filter { !$0.isMain }
                 .sorted { (bindingWindow($0)?.remaining ?? 101) < (bindingWindow($1)?.remaining ?? 101) }
         button.title = ""
-        button.image = renderStatus(ordered, appearance: button.effectiveAppearance)
+        button.image = renderStatus(ordered, pinned: snap.mainMode == "pinned",
+                                    appearance: button.effectiveAppearance)
         button.toolTip = ordered.compactMap { sub in
             bindingWindow(sub).map { "\(sub.sub) · \($0.name) \(Int($0.remaining.rounded()))% · \($0.why)" }
         }.joined(separator: "\n")
