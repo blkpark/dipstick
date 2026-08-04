@@ -77,13 +77,14 @@ func shortName(_ sub: String) -> String {
 /// rides on a small filled dot instead. Drawing to an image rather than hosting a
 /// custom view keeps the normal button behaviour: one click still opens the menu.
 func renderStatus(_ subs: [Subscription], appearance: NSAppearance?) -> NSImage {
-    // Condensed label, SF Mono figure. The condensed face buys menu bar width back
-    // and the monospaced digits stop the readout jittering as values change --
-    // together they read as instrumentation rather than as a sentence. Light
-    // weights: bold text beside the system's own readouts looks like shouting.
-    let nameFont = NSFont.systemFont(ofSize: 9, weight: .regular, width: .condensed)
-    let valueFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-    let gap: CGFloat = 11, height: CGFloat = 22
+    // Three variants rendered side by side against the system readouts settled
+    // this: the plain sans at semibold matches them exactly, where SF Mono's
+    // mechanical glyphs read as heavier than they are and a condensed regular
+    // label washes out. Digits stay monospaced so the figures do not twitch as
+    // values change.
+    let nameFont = NSFont.systemFont(ofSize: 9, weight: .semibold)
+    let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+    let gap: CGFloat = 7, height: CGFloat = 22
 
     struct Column { let name: NSAttributedString; let value: NSAttributedString; let width: CGFloat }
     var columns: [Column] = []
@@ -94,7 +95,7 @@ func renderStatus(_ subs: [Subscription], appearance: NSAppearance?) -> NSImage 
         // made three things compete in 22 points; the panel has room for both.
         let name = NSAttributedString(string: shortName(sub.sub), attributes: [
             .font: nameFont,
-            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.85),
+            .foregroundColor: NSColor.labelColor,
             .kern: 0.6])
         // Colour is reserved for trouble. TIGHT is still workable, so only LOW and
         // BLOCKED break monochrome -- a tint in the menu bar then always means
@@ -124,8 +125,14 @@ func renderStatus(_ subs: [Subscription], appearance: NSAppearance?) -> NSImage 
         var x: CGFloat = 0
         for column in columns {
             let nameSize = column.name.size(), valueSize = column.value.size()
-            column.name.draw(at: NSPoint(x: x + (column.width - nameSize.width) / 2, y: 11.5))
-            column.value.draw(at: NSPoint(x: x + (column.width - valueSize.width) / 2, y: 0.5))
+            // Positions come from the font metrics rather than tuned constants:
+            // the label sits flush to the top of the bar and the figure's baseline
+            // is pinned near the bottom, so raising the point size can never make
+            // the two boxes collide.
+            let nameY = height - nameSize.height
+            let valueY = 2 - abs(valueFont.descender)
+            column.name.draw(at: NSPoint(x: x + (column.width - nameSize.width) / 2, y: nameY))
+            column.value.draw(at: NSPoint(x: x + (column.width - valueSize.width) / 2, y: valueY))
             x += column.width + gap
         }
     }
