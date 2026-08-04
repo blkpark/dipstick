@@ -89,7 +89,15 @@ func renderStatus(_ subs: [Subscription], pinned: Bool, appearance: NSAppearance
     let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
     let gap: CGFloat = 7, height: CGFloat = 22
 
-    struct Column { let name: NSAttributedString; let value: NSAttributedString; let width: CGFloat }
+    let pinFont = NSFont.systemFont(ofSize: 7.5, weight: .bold)
+    let pinPadX: CGFloat = 4, pinGap: CGFloat = 4
+
+    struct Column {
+        let name: NSAttributedString
+        let value: NSAttributedString
+        let pin: NSAttributedString?
+        let width: CGFloat
+    }
     var columns: [Column] = []
 
     for sub in subs {
@@ -97,19 +105,19 @@ func renderStatus(_ subs: [Subscription], pinned: Bool, appearance: NSAppearance
         // One figure per column. The dot and the countdown that used to sit here
         // made three things compete in 22 points; the panel has room for both.
         // Pinned mode means this one pool takes every launch; the label says so
-        // right where the figure is read, instead of only inside the panel. The
-        // PIN part carries the accent colour so it reads as a mode marker rather
-        // than as part of the subscription's name.
-        let name = NSMutableAttributedString(string: shortName(sub.sub), attributes: [
+        // right where the figure is read. The marker is a filled pill -- label
+        // colour behind inverted text -- because a coloured word at 8pt washed
+        // out against the translucent bar where a solid shape does not.
+        let name = NSAttributedString(string: shortName(sub.sub), attributes: [
             .font: nameFont,
             .foregroundColor: NSColor.labelColor,
             .kern: 0.6])
-        if pinned && sub.isMain {
-            name.append(NSAttributedString(string: " PIN", attributes: [
-                .font: NSFont.systemFont(ofSize: 8, weight: .bold),
-                .foregroundColor: NSColor.controlAccentColor,
-                .kern: 0.6]))
-        }
+        let pin: NSAttributedString? = (pinned && sub.isMain)
+            ? NSAttributedString(string: "PIN", attributes: [
+                .font: pinFont,
+                .foregroundColor: NSColor.controlBackgroundColor,
+                .kern: 0.5])
+            : nil
         // Colour is reserved for trouble. TIGHT is still workable, so only LOW and
         // BLOCKED break monochrome -- a tint in the menu bar then always means
         // something needs attention rather than being decoration.
@@ -118,8 +126,10 @@ func renderStatus(_ subs: [Subscription], pinned: Bool, appearance: NSAppearance
         let value = NSAttributedString(
             string: "\(Int(win.remaining.rounded()))%",
             attributes: [.font: valueFont, .foregroundColor: tint])
-        columns.append(Column(name: name, value: value,
-                              width: max(name.size().width, value.size().width)))
+        let nameBlock = name.size().width
+            + (pin.map { $0.size().width + pinPadX * 2 + pinGap } ?? 0)
+        columns.append(Column(name: name, value: value, pin: pin,
+                              width: max(nameBlock, value.size().width)))
     }
     guard !columns.isEmpty else {
         let empty = NSImage(size: NSSize(width: 46, height: height))
@@ -144,7 +154,20 @@ func renderStatus(_ subs: [Subscription], pinned: Bool, appearance: NSAppearance
             // the two boxes collide.
             let nameY = height - nameSize.height
             let valueY = 2 - abs(valueFont.descender)
-            column.name.draw(at: NSPoint(x: x + (column.width - nameSize.width) / 2, y: nameY))
+            let pinSize = column.pin?.size() ?? .zero
+            let pillW = column.pin != nil ? pinSize.width + pinPadX * 2 : 0
+            let block = nameSize.width + (column.pin != nil ? pinGap + pillW : 0)
+            let nameX = x + (column.width - block) / 2
+            column.name.draw(at: NSPoint(x: nameX, y: nameY))
+            if let pin = column.pin {
+                let pillH = pinSize.height + 1.5
+                let pillRect = NSRect(x: nameX + nameSize.width + pinGap,
+                                      y: nameY + (nameSize.height - pillH) / 2 - 0.5,
+                                      width: pillW, height: pillH)
+                NSColor.labelColor.setFill()
+                NSBezierPath(roundedRect: pillRect, xRadius: pillH / 2, yRadius: pillH / 2).fill()
+                pin.draw(at: NSPoint(x: pillRect.minX + pinPadX, y: pillRect.minY + 0.5))
+            }
             column.value.draw(at: NSPoint(x: x + (column.width - valueSize.width) / 2, y: valueY))
             x += column.width + gap
         }

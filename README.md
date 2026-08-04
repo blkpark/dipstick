@@ -39,6 +39,7 @@ Requires macOS 13+ and Python 3.9+ (the system one is fine). No packages.
 git clone https://github.com/blkpark/dipstick.git && cd dipstick
 install -m 755 tools/dipstick ~/.local/bin/dipstick     # CLI
 ./scripts/bundle.sh && cp -R build/Dipstick.app /Applications/   # menu bar app
+./scripts/install-login.sh    # optional: start at login (--remove to undo)
 ```
 
 Reading the Claude figure needs its OAuth token, which lives in your login
