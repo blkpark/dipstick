@@ -178,6 +178,7 @@ struct PanelView: View {
     let snapshot: Snapshot?
     let cliMissing: Bool
     let onPick: (String) -> Void
+    let onMode: (String) -> Void
     let onDashboard: () -> Void
     let onRefresh: () -> Void
     let onQuit: () -> Void
@@ -235,6 +236,30 @@ struct PanelView: View {
                     Spacer(minLength: 0)
                 }
                 .padding(.top, 12)
+            }
+
+            if let snap = snapshot {
+                HStack(spacing: 8) {
+                    // The pin toggle lives here, not in a settings sheet: whether
+                    // one subscription takes everything is the panel's main lever.
+                    Toggle(isOn: Binding(
+                        get: { snap.mainMode == "pinned" },
+                        set: { onMode($0 ? "pinned" : "weighted") })) {
+                        Text(strings["pinnedMode"] ?? "Pinned main")
+                            .font(.system(size: 11))
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    Spacer(minLength: 8)
+                    if let next = snap.nextLaunch {
+                        Text((strings["nextLaunch"] ?? "Next launch") + ":")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Text(next)
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                }
+                .padding(.top, 10)
             }
         }
     }

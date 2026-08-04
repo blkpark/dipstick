@@ -16,6 +16,9 @@ struct Snapshot: Decodable {
     let main: String
     let subscriptions: [Subscription]
     let runningCodex: [Running]
+    /// Optional so a snapshot from an older CLI still decodes.
+    let mainMode: String?
+    let nextLaunch: String?
     /// Rendered verbatim. The CLI already localises everything it prints, so the
     /// app borrows those strings instead of formatting its own -- otherwise a
     /// Korean reading ends up next to an English "resets in 1h 28m".
@@ -301,6 +304,10 @@ extension AppDelegate {
             cliMissing: CLI.path == nil,
             onPick: { [weak self] key in
                 CLI.run(["--set-main", key])
+                self?.refresh()
+            },
+            onMode: { [weak self] mode in
+                CLI.run(["--main-mode", mode])
                 self?.refresh()
             },
             onDashboard: { [weak self] in self?.openDashboard() },
