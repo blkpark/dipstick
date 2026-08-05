@@ -120,6 +120,23 @@ graded against this surplus, not against fixed percentages.
 
 Either way it only answers "which one, right now". It still launches nothing.
 
+`--vendor codex` pins the **tool** while the account still follows the pick —
+so a shell function can route bare `codex` through the right account without
+ever swapping in another vendor's CLI (if the main is pinned to a different
+vendor, the pick falls back to the best account within the vendor: what you
+typed wins over the pin):
+
+```sh
+codex() {
+  local pre
+  if pre="$(command dipstick --main-cmd --vendor codex 2>/dev/null)"; then
+    eval "$pre" '"$@"'
+  else
+    command codex "$@"    # dipstick unavailable — never block work
+  fi
+}
+```
+
 ## What it doesn't do
 
 It doesn't launch anything, queue anything, or switch subscriptions for you. It

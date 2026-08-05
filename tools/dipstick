@@ -721,7 +721,9 @@ def launch_prefix(sub):
     home = codex_home_for(sub.split()[-1].lower())
     if not home:
         return None, L(f"{sub}: codex 홈을 못 찾음", f"{sub}: no codex home found")
-    return f'env CODEX_HOME="{home}" codex', ""
+    # `command` so the prefix still works when eval'd inside a shell function
+    # that itself shadows `codex` -- without it the function recurses forever.
+    return f'env CODEX_HOME="{home}" command codex', ""
 
 
 def sub_score(group):
@@ -734,7 +736,10 @@ def sub_score(group):
     return (min(rem) - 70.0) if rem else None    # no reset clock: rough proxy
 
 
-def pick_launch(db, rows):
+VENDOR_PREFIX = {"codex": "Codex", "claude": "Claude"}
+
+
+def pick_launch(db, rows, vendor=None):
     """(sub, why). Which subscription a new launch should burn.
 
     pinned: always the main -- one subscription takes everything.
@@ -742,17 +747,29 @@ def pick_launch(db, rows):
     floor means "kept for its own use", so those never enter unless they ARE the
     main; naming one as main is the explicit opt-in. The main gets MAIN_BONUS of
     stickiness so a marginal difference never flips the account mid-day.
+
+    vendor pins the TOOL: `--vendor codex` answers "which codex account", never
+    swapping in another vendor's CLI. If the pinned main is a different vendor,
+    the pin cannot be honoured for this call, so it falls back to the best pace
+    within the vendor -- the user's typed command wins over the pin.
     """
     main = get_setting(db, "main")
     mode = get_setting(db, "main_mode", "weighted")
-    if mode == "pinned" or not main:
+    prefix = VENDOR_PREFIX.get(vendor or "")
+    if vendor and not prefix:
+        return None, f"unknown vendor: {vendor}"
+
+    if (mode == "pinned" or not main) and (not prefix or (main or "").startswith(prefix)):
         return (main or None,
                 L("고정 모드", "pinned") if main else
                 L("메인 미지정 — --set-main 으로 정한다", "no main set — choose one with --set-main"))
+
     best, best_score = None, None
     for sub, _, group in group_by_subscription(rows, main):
         if sub.startswith("Antigravity"):
             continue                               # role-fixed, never a launch target
+        if prefix and not sub.startswith(prefix):
+            continue                               # the typed command fixes the vendor
         if reserve_floor(sub) is not None and sub != main:
             continue                               # reserved pools need the explicit opt-in
         score = sub_score(group)
@@ -763,15 +780,21 @@ def pick_launch(db, rows):
         if best_score is None or score > best_score:
             best, best_score = sub, score
     if best is None:
-        return main, L("후보 관측값 없음 — 메인 사용", "no candidate readings — using main")
-    tag = (L("가중 선택", "weighted pick") if best == main
-           else L(f"가중 선택 — 메인({main}) 대신", f"weighted pick — over main ({main})"))
+        fallback = main if (not prefix or (main or "").startswith(prefix)) else None
+        return fallback, L("후보 관측값 없음", "no candidate readings")
+    if prefix and mode == "pinned":
+        tag = L(f"벤더 고정({vendor}) — 핀({main})과 벤더 불일치, 벤더 내 최적 계정",
+                f"vendor-fixed ({vendor}) — pin ({main}) is another vendor; best account within")
+    elif best == main:
+        tag = L("가중 선택", "weighted pick")
+    else:
+        tag = L(f"가중 선택 — 메인({main}) 대신", f"weighted pick — over main ({main})")
     return best, tag
 
 
-def main_launch_cmd(db, rows):
+def main_launch_cmd(db, rows, vendor=None):
     """(command_prefix, error, warning). Empty error means safe to launch."""
-    sub, _why = pick_launch(db, rows)
+    sub, _why = pick_launch(db, rows, vendor)
     if not sub:
         return None, L("메인 미지정 — --set-main 으로 정한다",
                        "no main set — choose one with --set-main"), ""
@@ -1249,8 +1272,12 @@ def main(argv):
             return 0
 
         if "--main-cmd" in args:
+            vendor = None
+            if "--vendor" in args:
+                i = args.index("--vendor")
+                vendor = args[i + 1] if len(args) > i + 1 else None
             rows, _ = collect(db)
-            cmd, err, warn = main_launch_cmd(db, rows)
+            cmd, err, warn = main_launch_cmd(db, rows, vendor)
             if err:
                 print(err, file=sys.stderr)
                 return 1
