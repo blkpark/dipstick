@@ -717,7 +717,9 @@ MAIN_BONUS = 10.0    # %p of stickiness: the main keeps the launch unless clearl
 
 def launch_prefix(sub):
     if sub.startswith("Claude"):
-        return "claude --permission-mode bypassPermissions", ""
+        # `command` for the same reason as codex below: the prefix must survive
+        # being eval'd inside a shell function that shadows `claude`.
+        return "command claude --permission-mode bypassPermissions", ""
     home = codex_home_for(sub.split()[-1].lower())
     if not home:
         return None, L(f"{sub}: codex 홈을 못 찾음", f"{sub}: no codex home found")
@@ -770,8 +772,12 @@ def pick_launch(db, rows, vendor=None):
             continue                               # role-fixed, never a launch target
         if prefix and not sub.startswith(prefix):
             continue                               # the typed command fixes the vendor
-        if reserve_floor(sub) is not None and sub != main:
-            continue                               # reserved pools need the explicit opt-in
+        if reserve_floor(sub) is not None and sub != main and not prefix:
+            # Reserved pools stay out of the anonymous (@main) pick unless they
+            # ARE the main. A typed vendor is different: the reserve exists to
+            # protect the human's own use of that tool from background lanes,
+            # and the human typing the command IS that protected use.
+            continue
         score = sub_score(group)
         if score is None:
             continue

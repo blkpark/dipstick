@@ -135,7 +135,20 @@ codex() {
     command codex "$@"    # dipstick unavailable — never block work
   fi
 }
+claude() {   # same idea; write one per vendor you use
+  local pre
+  if pre="$(command dipstick --main-cmd --vendor claude 2>/dev/null)"; then
+    eval "$pre" '"$@"'
+  else
+    command claude "$@"
+  fi
+}
 ```
+
+A typed vendor also bypasses the reserve-floor exclusion: the floor exists to
+protect your own use of that tool from background jobs, and you typing the
+command *is* that protected use. The anonymous pick (no `--vendor`) still keeps
+reserved pools out unless one is the main.
 
 ## What it doesn't do
 
