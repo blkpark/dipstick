@@ -4,16 +4,19 @@
 # without it. hdiutil only -- no packaging dependencies.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
-version=$(defaults read "$root/build/Dipstick.app/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo dev)
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
+# Build first: reading the version off the previous bundle stamps every image
+# with the last release's number.
 "$root/scripts/bundle.sh" >/dev/null
+version=$(defaults read "$root/build/Dipstick.app/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo dev)
 cp -R "$root/build/Dipstick.app" "$stage/"
 ln -s /Applications "$stage/Applications"
 mkdir "$stage/CLI"
 cp "$root/tools/dipstick" "$stage/CLI/dipstick"
 cp "$root/scripts/install-login.sh" "$stage/CLI/"
+cp "$root/README.md" "$root/README_KOR.md" "$stage/"
 cat > "$stage/CLI/INSTALL.txt" <<'TXT'
 1. Drag Dipstick.app into Applications.
 2. Install the CLI the app reads from:
