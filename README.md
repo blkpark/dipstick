@@ -1,5 +1,7 @@
 # dipstick
 
+*[한국어 README](README_KOR.md)*
+
 How much is left on your AI coding subscriptions, and which one you're using right now.
 
 Claude Code, Codex and Antigravity each meter you on rolling windows, each shows
