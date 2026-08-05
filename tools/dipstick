@@ -590,11 +590,12 @@ def claude_rows(db):
         if not w or w.get("utilization") is None:
             continue
         remaining = 100 - float(w["utilization"])
-        resets = datetime.datetime.fromisoformat(w["resets_at"]).astimezone().replace(tzinfo=None)
+        resets = (datetime.datetime.fromisoformat(w["resets_at"]).astimezone()
+                  .replace(tzinfo=None)) if w.get("resets_at") else None
         sur = pace_surplus(remaining, mins, resets)
         wins.append({"name": window_label(mins), "remaining": remaining,
                      "minutes": mins, "resets": resets, "surplus": sur,
-                     "verdict": verdict(remaining, hours_until(resets),
+                     "verdict": verdict(remaining, hours_until(resets) if resets else 0,
                                         imminent=is_imminent(resets), surplus=sur)})
     # The limits array carries what the top-level fields do not: per-model weekly
     # caps ("weekly_scoped" with scope.model, e.g. Fable on Max plans). session and
