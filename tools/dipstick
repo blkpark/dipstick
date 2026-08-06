@@ -53,7 +53,11 @@ CODEX_HOME_GLOBS = [
 ]
 CONFIG_PATH = os.path.expanduser("~/.config/dipstick/config.json")
 GOOGLE_ACCOUNTS = os.path.expanduser("~/.gemini/google_accounts.json")
-CLAUDE_KEYCHAIN = "Claude Code-credentials"
+# Claude Code stores its OAuth in the login keychain, but wrappers that manage
+# several accounts keep their own copy -- and the default entry can be left
+# logged out (present, with an empty accessToken) while the wrapper's copy is the
+# live one. Both are tried, in order, and the first usable token wins.
+CLAUDE_KEYCHAINS = ["Claude Code-credentials", "Orca Claude Code Managed Credentials"]
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 AGY_RPC = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
 DB_PATH = os.path.expanduser(os.environ.get("DIPSTICK_DB",
@@ -543,24 +547,53 @@ def claude_account():
         return "계정 미상"
 
 
+def claude_credentials():
+    """(oauth, note). First usable credential across the known keychain entries.
+
+    An entry can exist and still be logged out: the CLI leaves the record behind
+    with an empty accessToken and expiresAt of 0. Reading that as "expired" sent
+    people off to refresh a token that was never there, so an absent token and a
+    stale one are told apart -- and a wrapper's own copy is tried before giving up,
+    since the default entry is often the logged-out one.
+    """
+    found_any = False
+    for service in CLAUDE_KEYCHAINS:
+        try:
+            raw = subprocess.run(["security", "find-generic-password", "-w", "-s", service,
+                                  "-a", os.environ.get("USER", "")],
+                                 capture_output=True, text=True, timeout=30)
+            if raw.returncode != 0 or not raw.stdout.strip():
+                raw = subprocess.run(["security", "find-generic-password", "-w", "-s", service],
+                                     capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None, L("keychain 읽기 실패 (접근 승인 필요)",
+                           "keychain read failed (access approval needed)")
+        if raw.returncode != 0 or not raw.stdout.strip():
+            continue
+        found_any = True
+        try:
+            oauth = json.loads(raw.stdout)["claudeAiOauth"]
+        except (ValueError, KeyError):
+            continue
+        if oauth.get("accessToken"):
+            return oauth, ""
+    if not found_any:
+        return None, L("keychain 항목 없음 또는 접근 거부", "no keychain entry, or access denied")
+    return None, L("로그아웃 상태 — `claude auth login` 하면 읽힌다",
+                   "logged out — run `claude auth login` and it will read")
+
+
 def claude_rows(db):
     base = {"account": claude_account(), "sub": "Claude", "pool": None, "windows": []}
-    try:
-        raw = subprocess.run(["security", "find-generic-password", "-w", "-s", CLAUDE_KEYCHAIN,
-                              "-a", os.environ.get("USER", "")],
-                             capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return [dict(base, note="keychain 읽기 실패 (접근 승인 필요)")]
-    if raw.returncode != 0 or not raw.stdout.strip():
-        return [dict(base, note="keychain 항목 없음 또는 접근 거부")]
-    try:
-        oauth = json.loads(raw.stdout)["claudeAiOauth"]
-    except (ValueError, KeyError):
-        return [dict(base, note="credential 형식이 예상과 다름")]
+    oauth, err = claude_credentials()
+    if err:
+        return [dict(base, note=err)]
 
     base["sub"] = sub_label("Claude", oauth.get("subscriptionType"))
-    if oauth.get("expiresAt", 0) / 1000 < now.timestamp():
-        return [dict(base, note="access token 만료 — 아무 claude 명령이나 한 번 실행하면 갱신됨")]
+    expires = oauth.get("expiresAt") or 0
+    if expires and expires / 1000 < now.timestamp():
+        return [dict(base, note=L("access token 만료 — 아무 claude 명령이나 한 번 실행하면 갱신됨",
+                                  "access token expired — run any claude command to refresh"))]
     note = ""
     body, age = cache_get(db, "claude_usage", CLAUDE_TTL)
     if body is None:

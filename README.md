@@ -47,6 +47,9 @@ install -m 755 tools/dipstick ~/.local/bin/dipstick     # CLI
 Reading the Claude figure needs its OAuth token, which lives in your login
 keychain, so the first run raises a macOS access prompt. The token is used to
 call Anthropic's own usage endpoint and is never stored or sent anywhere else.
+dipstick only ever reads it — refreshing is Claude Code's job, and doing it here
+would rotate the token out from under a running session. If the reading says
+*logged out*, `claude auth login` restores it.
 
 ## Use
 
