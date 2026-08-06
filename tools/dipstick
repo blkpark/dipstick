@@ -795,10 +795,15 @@ def pick_launch(db, rows, vendor=None):
     if vendor and not prefix:
         return None, f"unknown vendor: {vendor}"
 
-    if (mode == "pinned" or not main) and (not prefix or (main or "").startswith(prefix)):
-        return (main or None,
-                L("고정 모드", "pinned") if main else
-                L("메인 미지정 — --set-main 으로 정한다", "no main set — choose one with --set-main"))
+    # Pinned is absolute (owner 2026-08-06): everything goes to that one pool, so
+    # it overrides the pace pick, the reserve floor and a typed vendor alike.
+    # Concentrating spend is the entire point of the mode -- a route that quietly
+    # sent work elsewhere would be the leak it exists to close.
+    if mode == "pinned" and main:
+        return main, L("고정 모드 — 전량 집중", "pinned — everything goes here")
+    if not main:
+        return None, L("메인 미지정 — --set-main 으로 정한다",
+                       "no main set — choose one with --set-main")
 
     best, best_score = None, None
     for sub, _, group in group_by_subscription(rows, main):
@@ -822,10 +827,7 @@ def pick_launch(db, rows, vendor=None):
     if best is None:
         fallback = main if (not prefix or (main or "").startswith(prefix)) else None
         return fallback, L("후보 관측값 없음", "no candidate readings")
-    if prefix and mode == "pinned":
-        tag = L(f"벤더 고정({vendor}) — 핀({main})과 벤더 불일치, 벤더 내 최적 계정",
-                f"vendor-fixed ({vendor}) — pin ({main}) is another vendor; best account within")
-    elif best == main:
+    if best == main:
         tag = L("가중 선택", "weighted pick")
     else:
         tag = L(f"가중 선택 — 메인({main}) 대신", f"weighted pick — over main ({main})")

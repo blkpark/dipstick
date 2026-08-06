@@ -121,7 +121,9 @@ graded against this surplus, not against fixed percentages.
   with the main getting 10%p of stickiness so a marginal difference never flips
   the account mid-day. Pools with a `reserve` floor are *kept for their own use*
   and never enter the pick unless you named one as main — that is the opt-in.
-- **pinned** — always the main. One subscription takes everything.
+- **pinned** — absolute. The main takes everything: it overrides the pace pick,
+  the reserve floor and a typed `--vendor` alike, since concentrating spend is
+  the whole point of the mode.
 
 Either way it only answers "which one, right now". It still launches nothing.
 
@@ -132,23 +134,24 @@ vendor, the pick falls back to the best account within the vendor: what you
 typed wins over the pin):
 
 ```sh
-codex() {
+_dipstick_run() {
+  local want="$1"; shift
   local pre
-  if pre="$(command dipstick --main-cmd --vendor codex 2>/dev/null)"; then
+  if pre="$(command dipstick --main-cmd --vendor "$want" 2>/dev/null)" \
+     && [[ "$pre" == *"$want"* ]]; then
     eval "$pre" '"$@"'
   else
-    command codex "$@"    # dipstick unavailable — never block work
+    command "$want" "$@"    # wrong vendor, or no dipstick — never break the command
   fi
 }
-claude() {   # same idea; write one per vendor you use
-  local pre
-  if pre="$(command dipstick --main-cmd --vendor claude 2>/dev/null)"; then
-    eval "$pre" '"$@"'
-  else
-    command claude "$@"
-  fi
-}
+codex()  { _dipstick_run codex  "$@" }
+claude() { _dipstick_run claude "$@" }
 ```
+
+The `$pre == *$want*` check matters under a pin: the answer can name a different
+vendor entirely, and running codex because you typed claude does not concentrate
+spend — it just breaks the command. The prefix is used only when it still names
+the vendor you asked for.
 
 A typed vendor also bypasses the reserve-floor exclusion: the floor exists to
 protect your own use of that tool from background jobs, and you typing the
