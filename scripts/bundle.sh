@@ -24,8 +24,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>dev.blkpark.dipstick</string>
   <key>CFBundleExecutable</key><string>Dipstick</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.1</string>
-  <key>CFBundleVersion</key><string>2</string>
+  <key>CFBundleShortVersionString</key><string>0.1.2</string>
+  <key>CFBundleVersion</key><string>3</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <!-- menu bar only: no Dock icon, no app switcher entry -->
   <key>LSUIElement</key><true/>
