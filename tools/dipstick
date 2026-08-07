@@ -795,13 +795,16 @@ def pick_launch(db, rows, vendor=None):
     if vendor and not prefix:
         return None, f"unknown vendor: {vendor}"
 
-    # Pinned is absolute (owner 2026-08-06): everything goes to that one pool, so
-    # it overrides the pace pick, the reserve floor and a typed vendor alike.
-    # Concentrating spend is the entire point of the mode -- a route that quietly
-    # sent work elsewhere would be the leak it exists to close.
-    if mode == "pinned" and main:
+    # The pin is absolute for dispatch, scoped for typed commands. An anonymous
+    # pick is "run this work somewhere" -- everything goes to the pinned pool,
+    # overriding the pace pick and the reserve floor; concentrating spend is the
+    # point of the mode. A typed vendor is different: the human already chose the
+    # tool, and answering with another vendor's CLI would not concentrate spend,
+    # it would replace the command. There the pin applies only when it names the
+    # same vendor; otherwise the pick stays inside the vendor asked for.
+    if mode == "pinned" and main and (not prefix or main.startswith(prefix)):
         return main, L("고정 모드 — 전량 집중", "pinned — everything goes here")
-    if not main:
+    if not main and not prefix:
         return None, L("메인 미지정 — --set-main 으로 정한다",
                        "no main set — choose one with --set-main")
 
@@ -827,7 +830,10 @@ def pick_launch(db, rows, vendor=None):
     if best is None:
         fallback = main if (not prefix or (main or "").startswith(prefix)) else None
         return fallback, L("후보 관측값 없음", "no candidate readings")
-    if best == main:
+    if prefix and mode == "pinned":
+        tag = L(f"벤더 고정({vendor}) — 핀({main})은 다른 벤더, 벤더 내 최적 계정",
+                f"vendor-fixed ({vendor}) — pin ({main}) is another vendor; best within")
+    elif best == main:
         tag = L("가중 선택", "weighted pick")
     else:
         tag = L(f"가중 선택 — 메인({main}) 대신", f"weighted pick — over main ({main})")

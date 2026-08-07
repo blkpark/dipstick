@@ -121,17 +121,18 @@ graded against this surplus, not against fixed percentages.
   with the main getting 10%p of stickiness so a marginal difference never flips
   the account mid-day. Pools with a `reserve` floor are *kept for their own use*
   and never enter the pick unless you named one as main — that is the opt-in.
-- **pinned** — absolute. The main takes everything: it overrides the pace pick,
-  the reserve floor and a typed `--vendor` alike, since concentrating spend is
-  the whole point of the mode.
+- **pinned** — absolute for dispatch. The main takes every anonymous pick,
+  overriding the pace calculation and the reserve floor: concentrating spend is
+  the whole point of the mode. A typed `--vendor` is the one thing it does not
+  cross — the human already chose the tool, and answering with another vendor's
+  CLI would replace the command, not concentrate spend.
 
 Either way it only answers "which one, right now". It still launches nothing.
 
-`--vendor codex` pins the **tool** while the account still follows the pick —
-so a shell function can route bare `codex` through the right account without
-ever swapping in another vendor's CLI (if the main is pinned to a different
-vendor, the pick falls back to the best account within the vendor: what you
-typed wins over the pin):
+`--vendor codex` pins the **tool** while the account still follows the pick.
+If the main is pinned to a different vendor, the pick stays inside the vendor
+you asked for — what you typed wins. That makes bare `codex` / `claude`
+routable through a shell function:
 
 ```sh
 _dipstick_run() {
@@ -148,10 +149,10 @@ codex()  { _dipstick_run codex  "$@" }
 claude() { _dipstick_run claude "$@" }
 ```
 
-The `$pre == *$want*` check matters under a pin: the answer can name a different
-vendor entirely, and running codex because you typed claude does not concentrate
-spend — it just breaks the command. The prefix is used only when it still names
-the vendor you asked for.
+The `$pre == *$want*` check is defence in depth: the CLI already keeps a typed
+vendor, so the guard only matters if an older dipstick answers — the prefix is
+used only when it names the vendor you asked for, and the plain binary runs
+otherwise.
 
 A typed vendor also bypasses the reserve-floor exclusion: the floor exists to
 protect your own use of that tool from background jobs, and you typing the
