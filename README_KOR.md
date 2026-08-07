@@ -37,7 +37,7 @@ install -m 755 tools/dipstick ~/.local/bin/dipstick     # CLI
 ./scripts/install-login.sh    # 선택 사항: 로그인 시 시작 (--remove로 해제)
 ```
 
-Claude 수치를 읽으려면 OAuth 토큰이 필요합니다. 이 토큰은 로그인 키체인에 있으므로, 첫 실행 시 macOS 접근 허용 창이 뜹니다. 토큰은 Anthropic의 자체 사용량 엔드포인트를 호출하는 데만 사용되며, 저장되거나 다른 곳으로 전송되지 않습니다.
+Claude 수치를 읽으려면 OAuth 토큰이 필요합니다. 이 토큰은 로그인 키체인에 있으므로, 첫 실행 시 macOS 접근 허용 창이 뜹니다. 토큰은 Anthropic의 자체 사용량 엔드포인트를 호출하는 데만 사용되며, 저장되거나 다른 곳으로 전송되지 않습니다. dipstick은 토큰을 읽기만 합니다. 갱신은 Claude Code의 몫이며, 여기서 갱신하면 실행 중인 세션의 토큰을 회전시켜 버립니다. 측정값에 *로그아웃*이 표시되면 `claude auth login`으로 복구됩니다.
 
 ## 사용법
 
@@ -89,30 +89,30 @@ $(dipstick --main-cmd) "$(cat prompt.txt)"
 `--main-cmd`는 새 실행이 어떤 구독을 태울지 두 가지 모드 중 하나로 선택합니다. 모드는 `--main-mode` 또는 웹 헤더의 토글로 정합니다.
 
 - **weighted**(기본값): 사용할 수 있는 구독 중 페이스가 가장 좋은 것을 고릅니다. main에는 10%p의 유지 가중치를 주어, 아주 작은 차이 때문에 하루 중간에 계정이 바뀌지 않게 합니다. `reserve` 하한선이 있는 풀은 *자체 사용분으로 보존*되며, 직접 main으로 지정하지 않는 한 선택 대상에 들어가지 않습니다. 직접 main으로 지정하는 것이 opt-in입니다.
-- **pinned**: 항상 main을 사용합니다. 하나의 구독이 모든 작업을 맡습니다.
+- **pinned**: dispatch에는 절대적입니다. 익명 선택은 전부 main으로 가며, 페이스 계산과 reserve 하한선까지 무시합니다. 사용량을 한곳에 몰아주는 것이 이 모드의 목적이기 때문입니다. 단 하나 넘지 않는 것이 있는데, 직접 입력한 `--vendor`입니다. 도구는 이미 사람이 골랐고, 다른 벤더의 CLI로 답하는 것은 사용량 집중이 아니라 명령 대체이기 때문입니다.
 
 어느 쪽이든 답하는 것은 “지금 어느 것인가”뿐입니다. 실제로 무언가를 실행하지는 않습니다.
 
-`--vendor codex`는 **도구**를 고정하되, 계정은 여전히 선택 로직을 따르게 합니다. 따라서 셸 함수에서 평범한 `codex` 명령을 올바른 계정으로 라우팅할 수 있고, 다른 벤더의 CLI로 바뀌는 일은 없습니다. main이 다른 벤더로 고정되어 있다면 선택은 해당 벤더 안에서 가장 좋은 계정으로 fallback됩니다. 사용자가 입력한 명령이 pin보다 우선합니다.
+`--vendor codex`는 **도구**를 고정하되, 계정은 여전히 선택 로직을 따르게 합니다. main이 다른 벤더에 pin되어 있어도 선택은 요청한 벤더 안에 머뭅니다 — 입력한 명령이 이깁니다. 덕분에 평범한 `codex` / `claude`를 셸 함수로 라우팅할 수 있습니다.
 
 ```sh
-codex() {
+_dipstick_run() {
+  local want="$1"; shift
   local pre
-  if pre="$(command dipstick --main-cmd --vendor codex 2>/dev/null)"; then
+  if pre="$(command dipstick --main-cmd --vendor "$want" 2>/dev/null)" \
+     && [[ "$pre" == *"$want"* ]]; then
     eval "$pre" '"$@"'
   else
-    command codex "$@"    # dipstick을 쓸 수 없어도 작업은 막지 않음
+    command "$want" "$@"    # 벤더가 다르거나 dipstick이 없어도 명령은 깨지 않음
   fi
 }
-claude() {   # 같은 방식입니다. 사용하는 벤더마다 하나씩 만들면 됩니다.
-  local pre
-  if pre="$(command dipstick --main-cmd --vendor claude 2>/dev/null)"; then
-    eval "$pre" '"$@"'
-  else
-    command claude "$@"
-  fi
-}
+codex()  { _dipstick_run codex  "$@" }
+claude() { _dipstick_run claude "$@" }
 ```
+
+`$pre == *$want*` 검사는 이중 방어입니다. CLI 자체가 입력한 벤더를 유지하므로 이 가드는
+구버전 dipstick이 답할 때만 의미가 있습니다 — 접두어는 요청한 벤더를 담고 있을 때만 쓰고,
+아니면 원래 바이너리를 그대로 실행합니다.
 
 입력한 벤더는 reserve 하한선 제외 규칙도 우회합니다. 하한선은 백그라운드 작업으로부터 해당 도구의 개인 사용분을 보호하기 위한 것이고, 사용자가 직접 명령을 입력하는 행위 자체가 바로 그 보호 대상 사용이기 때문입니다. 익명 선택, 즉 `--vendor` 없이 고르는 경우에는 main으로 지정된 구독이 아닌 한 reserved 풀을 계속 제외합니다.
 
