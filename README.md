@@ -90,7 +90,7 @@ Everything below is optional — `~/.config/dipstick/config.json`:
 
 ```json
 {
-  "reserve": { "Claude": 20 },
+  "reserve": { "Claude": 30 },
   "policy": {
     "Codex Pro": ["2nd", "when the smaller plan runs short"]
   },
