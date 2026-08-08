@@ -37,7 +37,7 @@ install -m 755 tools/dipstick ~/.local/bin/dipstick     # CLI
 ./scripts/install-login.sh    # 선택 사항: 로그인 시 시작 (--remove로 해제)
 ```
 
-Claude 수치를 읽으려면 OAuth 토큰이 필요합니다. 이 토큰은 로그인 키체인에 있으므로, 첫 실행 시 macOS 접근 허용 창이 뜹니다. 토큰은 Anthropic의 자체 사용량 엔드포인트를 호출하는 데만 사용되며, 저장되거나 다른 곳으로 전송되지 않습니다. dipstick은 토큰을 읽기만 합니다. 갱신은 Claude Code의 몫이며, 여기서 갱신하면 실행 중인 세션의 토큰을 회전시켜 버립니다. 측정값에 *로그아웃*이 표시되면 `claude auth login`으로 복구됩니다.
+Claude 수치를 읽으려면 OAuth 토큰이 필요합니다. 이 토큰은 로그인 키체인에 있으므로, 첫 실행 시 macOS 접근 허용 창이 뜹니다. 토큰은 Anthropic의 자체 사용량 엔드포인트를 호출하는 데만 사용되며, 저장되거나 다른 곳으로 전송되지 않습니다. 토큰이 만료되면 dipstick이 CLI와 같은 OAuth refresh 흐름으로 갱신하고, 결과를 같은 키체인 항목에 통째로 다시 써 둡니다 — 항목의 다른 내용은 보존되고, 모든 리더가 같은 토큰을 쓰게 되어 회전 경합이 없습니다. 사람 손이 필요한 것은 *로그아웃* 상태뿐입니다: `claude auth login`으로 복구됩니다.
 
 ## 사용법
 

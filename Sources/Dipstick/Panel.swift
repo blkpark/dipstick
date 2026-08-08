@@ -177,6 +177,9 @@ struct SubscriptionBlock: View {
 struct PanelView: View {
     let snapshot: Snapshot?
     let cliMissing: Bool
+    let refreshing: Bool
+    let lastSync: Date?
+    let lastSyncFailed: Bool
     let onPick: (String) -> Void
     let onMode: (String) -> Void
     let onDashboard: () -> Void
@@ -309,16 +312,43 @@ struct PanelView: View {
     }
 
     private var footer: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             Divider().padding(.top, 10).padding(.bottom, 8)
             HStack(spacing: 14) {
                 Button(strings["openDashboard"] ?? "Open dashboard…", action: onDashboard)
-                Button(strings["refresh"] ?? "Refresh", action: onRefresh)
+                if refreshing {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.small)
+                        Text(strings["refreshing"] ?? "syncing…").foregroundStyle(.secondary)
+                    }
+                } else {
+                    Button(strings["refresh"] ?? "Refresh", action: onRefresh)
+                }
                 Spacer()
                 Button(strings["quit"] ?? "Quit", action: onQuit)
             }
             .buttonStyle(.link)
             .font(.system(size: 11))
+            syncLine
+        }
+    }
+
+    /// When the numbers last actually changed hands -- the whole point of the
+    /// line is answering "is this current or stuck?" at a glance.
+    @ViewBuilder private var syncLine: some View {
+        if lastSyncFailed {
+            Label(strings["syncFailed"] ?? "sync failed — showing last values",
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 9.5))
+                .foregroundStyle(.orange)
+                .padding(.top, 5)
+        } else if let t = lastSync {
+            Text((strings["syncedAt"] ?? "synced {t}")
+                    .replacingOccurrences(of: "{t}",
+                        with: t.formatted(date: .omitted, time: .standard)))
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .padding(.top, 5)
         }
     }
 }

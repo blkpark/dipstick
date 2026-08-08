@@ -243,6 +243,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     var snapshot: Snapshot?
     var serverPort = 8787
+    // Sync visibility: a refresh used to happen with no trace, so there was no
+    // telling whether the numbers were fresh or the app was quietly stuck.
+    var refreshing = false
+    var lastSync: Date?
+    var lastSyncFailed = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
         item.button?.target = self
@@ -256,17 +261,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func refresh() {
+        if refreshing { return }        // one in flight is enough
+        refreshing = true
+        repaint()
+        // The status item dims while a sync runs -- visible even with the panel
+        // closed, and it recovers on its own when the run finishes.
+        item.button?.alphaValue = 0.5
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let data = CLI.run(["--json"])
             let snap = data.flatMap { try? JSONDecoder().decode(Snapshot.self, from: $0) }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.snapshot = snap
-                self.updateTitle()
-                if self.popover.isShown {
-                    self.popover.contentViewController?.view = self.makePanel()
+                self.refreshing = false
+                self.lastSyncFailed = (snap == nil)
+                if snap != nil {
+                    self.snapshot = snap    // a failed run keeps the last good numbers
+                    self.lastSync = Date()
                 }
+                self.item.button?.alphaValue = 1
+                self.repaint()
             }
+        }
+    }
+
+    private func repaint() {
+        updateTitle()
+        if popover.isShown {
+            popover.contentViewController?.view = makePanel()
         }
     }
 
@@ -336,6 +357,9 @@ extension AppDelegate {
         let view = PanelView(
             snapshot: snapshot,
             cliMissing: CLI.path == nil,
+            refreshing: refreshing,
+            lastSync: lastSync,
+            lastSyncFailed: lastSyncFailed,
             onPick: { [weak self] key in
                 CLI.run(["--set-main", key])
                 self?.refresh()
