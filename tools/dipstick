@@ -1448,6 +1448,13 @@ h1{font-size:14px;font-weight:700;margin:0}
 .mix b{color:var(--fg);font-weight:600}
 .tokbasis{font-size:10px;color:var(--dim);margin-top:5px;line-height:1.45}
 .tokempty{font-size:11px;color:var(--dim);padding:5px 0}
+.bymodel{margin-top:6px;display:grid;gap:2px}
+.mrow{display:flex;justify-content:space-between;gap:8px;font-size:11px;
+ padding:2px 0;border-bottom:1px dotted var(--line)}
+.mrow:last-child{border-bottom:0}
+.mname{color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+ font-size:10.5px}
+.mrow b{font-weight:600}
 form.pick{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line)}
 form.modesw{display:inline;margin-left:10px}
 .stamp b{color:var(--fg)}
@@ -1487,6 +1494,81 @@ def apply_lang(db, override=None):
 
 MIN_CALIB_PCT = 15.0   # below this the ratio divides by noise, so no estimate
 MAX_SPREAD = 1.0       # past windows disagreeing by more than this: show no number
+
+
+MIN_FIT = 0.7           # R² below this and per-model weights are not worth quoting
+MIN_BLEND_FIT = 0.4     # and below this even a blended range is not worth quoting
+MIN_MODEL_SHARE = 0.02  # models under this share of spend are noise in the fit
+
+
+def model_weights(db, sub, window, minutes, blended=False):
+    """Per-model %p-per-million-tokens for one window, or None if the fit is weak.
+
+    Models do not drain a window at the same rate, so one blended ratio answers
+    a question nobody asked: how much is left depends on what you run next.
+    Solved per model instead, non-negative -- a model that consumes quota cannot
+    give it back, and an unconstrained fit happily returns negative weights.
+
+    The fit is scored against the same hours it was built from and withheld
+    below MIN_FIT. Measured here: Codex ProLite lands at 0.93, Claude's 7-day
+    window at 0.46, and the five-hour window near zero, which is the difference
+    between a figure worth showing and one worth refusing.
+    """
+    key = _token_key(sub)
+    rows = db.execute("SELECT model, SUM(input+output+cache_read+cache_write) FROM tokens "
+                      "WHERE sub=? AND model!='' GROUP BY model", (key,)).fetchall()
+    total = sum(v for _, v in rows) or 1
+    models = [m for m, v in sorted(rows, key=lambda r: -r[1]) if v / total >= MIN_MODEL_SHARE]
+    if not models:
+        return None
+    spend = {m: dict(db.execute(
+        "SELECT hour, input+output+cache_read+cache_write FROM tokens WHERE sub=? AND model=?",
+        (key, m))) for m in models}
+
+    # Utilisation lost in each clock hour, from the readings taken during it.
+    per_hour, prev, drops = {}, None, {}
+    for taken, rem in db.execute("SELECT taken_at, remaining FROM samples "
+                                 "WHERE sub=? AND window=? ORDER BY taken_at", (sub, window)):
+        e = per_hour.setdefault(taken[:13], [rem, rem])
+        e[1] = rem
+    for hour in sorted(per_hour):
+        first, last = per_hour[hour]
+        if prev is not None:
+            d = (prev - first) + (first - last)
+            if 0 < d < 40:      # a reset shows up as a jump, not a drop
+                drops[hour] = d
+        prev = last
+
+    X, y = [], []
+    for hour, d in drops.items():
+        row = [spend[m].get(hour, 0) / 1e6 for m in models]
+        if sum(row) > 0:
+            X.append([sum(row)] if blended else row)
+            y.append(d)
+    if len(X) < 20:
+        return None
+
+    if blended:
+        models = ["*"]
+    n = len(models)
+    w = [0.0] * n
+    for _ in range(200):        # coordinate descent, clamped at zero
+        for i in range(n):
+            num = den = 0.0
+            for k, row in enumerate(X):
+                resid = y[k] - sum(w[j] * row[j] for j in range(n) if j != i)
+                num += row[i] * resid
+                den += row[i] * row[i]
+            w[i] = max(0.0, num / den) if den > 1e-12 else 0.0
+    mean = sum(y) / len(y)
+    denom = sum((v - mean) ** 2 for v in y)
+    if denom <= 0:
+        return None
+    err = sum((y[k] - sum(w[i] * X[k][i] for i in range(n))) ** 2 for k in range(len(X)))
+    r2 = 1 - err / denom
+    if r2 < (MIN_BLEND_FIT if blended else MIN_FIT):
+        return None
+    return {"r2": r2, "weights": [(m, v) for m, v in zip(models, w) if v > 0]}
 
 
 def calibration_spread(db, sub, window, minutes):
@@ -1553,14 +1635,24 @@ def token_view(db, sub, windows):
         used_pct = 100.0 - w["remaining"]
         est = per_pct = lo = hi = None
         complete = bool(get_setting(db, "tokens_complete", ""))
-        spread = calibration_spread(db, sub, w["name"], w["minutes"]) if complete else None
-        if complete and used_pct >= MIN_CALIB_PCT and total > 0:
+        blend = (model_weights(db, sub, w["name"], w["minutes"], blended=True)
+                 if complete else None)
+        spread = (calibration_spread(db, sub, w["name"], w["minutes"])
+                  if complete and blend else None)
+        if complete and blend and used_pct >= MIN_CALIB_PCT and total > 0:
             per_pct = total / used_pct
             if spread is not None and spread <= MAX_SPREAD:
                 est = per_pct * w["remaining"]
                 lo, hi = est * max(0.05, 1 - spread), est * (1 + spread)
         billable = spent["input"] + spent["output"] + spent["cache_write"]
+        fit = model_weights(db, sub, w["name"], w["minutes"]) if complete else None
+        per_model = []
+        if fit:
+            for name, weight in sorted(fit["weights"], key=lambda t: t[1]):
+                if weight > 0:
+                    per_model.append((name, w["remaining"] / weight * 1e6))
         out.append({"window": w, "spent": spent, "total": total, "billable": billable,
+                    "fit": fit, "per_model": per_model,
                     "cache_pct": (spent["cache_read"] / total * 100) if total else 0.0,
                     "per_pct": per_pct, "estimate": est, "lo": lo, "hi": hi,
                     "complete": complete,
@@ -1722,7 +1814,9 @@ def render_html(db, rows, consumers, path=None, interactive=False):
                 w = t["window"]
                 p.append(f'<div class="tokwin" data-s="{w["verdict"][0]}">'
                          f'<div class="tokhead"><span>{esc(w["name"])}</span>')
-                if t["estimate"] is not None:
+                if t["per_model"]:
+                    p.append(f'<span class="est q">{L("모델별 아래", "by model below")}</span>')
+                elif t["estimate"] is not None:
                     p.append(f'<span class="est">{L("남은 토큰 대략", "roughly left")} '
                              f'<b>{human_tokens(t["lo"])}\u2013{human_tokens(t["hi"])}</b></span>')
                 elif not t["complete"]:
@@ -1747,6 +1841,18 @@ def render_html(db, rows, consumers, path=None, interactive=False):
                     p.append(f'<div class="tokempty">'
                              f'{L("이 창에서 이 컴퓨터가 기록한 사용 없음", "nothing logged on this machine in this window")}'
                              f'</div>')
+                if t["per_model"]:
+                    p.append('<div class="bymodel">')
+                    for name, left in t["per_model"]:
+                        p.append(f'<div class="mrow"><span class="mname">{esc(name)}</span>'
+                                 f'<b>{human_tokens(left)}</b></div>')
+                    p.append('</div>')
+                    p.append(f'<div class="tokbasis">{esc(L(
+                        f"이 모델만 써서 창을 다 태울 때의 양. 시간대별 소모를 모델별로 갈라 "
+                        f"맞췄고 설명력 R²={t["fit"]["r2"]:.2f}. 섞어 쓰면 그 사이 어딘가다.",
+                        f"what each model alone would spend to finish the window. Fitted per "
+                        f"model against hourly drain, R²={t["fit"]["r2"]:.2f}. Mixing lands "
+                        f"somewhere between."))}</div>')
                 if not t["complete"]:
                     p.append(f'<div class="tokbasis">'
                              f'{esc(L("과거 기록을 아직 읽는 중이라 사용량이 실제보다 적게 나온다. "
