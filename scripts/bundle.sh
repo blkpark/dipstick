@@ -14,6 +14,12 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/Dipstick"
 
+# The icon is generated, not committed as a binary blob: assets/icon.svg is the
+# source and make-icon.sh bakes it. Built on demand so a fresh clone still ends
+# up with a real icon instead of the generic application tile.
+[ -f "$root/assets/Dipstick.icns" ] || sh "$root/scripts/make-icon.sh" >/dev/null
+cp "$root/assets/Dipstick.icns" "$app/Contents/Resources/Dipstick.icns"
+
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -23,9 +29,10 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>Dipstick</string>
   <key>CFBundleIdentifier</key><string>dev.blkpark.dipstick</string>
   <key>CFBundleExecutable</key><string>Dipstick</string>
+  <key>CFBundleIconFile</key><string>Dipstick</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.3</string>
-  <key>CFBundleVersion</key><string>11</string>
+  <key>CFBundleShortVersionString</key><string>0.3.4</string>
+  <key>CFBundleVersion</key><string>12</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <!-- menu bar only: no Dock icon, no app switcher entry -->
   <key>LSUIElement</key><true/>

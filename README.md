@@ -1,3 +1,5 @@
+<img src="assets/logo.svg" width="72" align="right" alt="">
+
 # dipstick
 
 *[한국어 README](README_KOR.md)*

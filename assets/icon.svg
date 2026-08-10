@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="dipstick">
+  <title>dipstick</title>
+  <desc>App tile: the blade carries the state scale and the wet line is the reading.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#0b1220"/>
+    </linearGradient>
+    <!-- Bottom to top: the same scale the app grades a reading against, so the
+         icon teaches its colour language before the app is even opened. -->
+    <linearGradient id="scale" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#f87171"/>
+      <stop offset=".38" stop-color="#fb923c"/>
+      <stop offset=".62" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#4ade80"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cbd5e1"/>
+      <stop offset="1" stop-color="#7c8899"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS squircle, drawn a little inset so the mark keeps its margin -->
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#tile)"/>
+
+  <g transform="translate(512 512) scale(13.2) translate(-32 -32)">
+    <g fill="none" stroke="url(#steel)" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="32" cy="11" r="6.5" stroke-width="4"/>
+      <path d="M32 17.5v6" stroke-width="4"/>
+      <rect x="25" y="24" width="14" height="34" rx="7" stroke-width="4"/>
+    </g>
+    <rect x="29" y="27.5" width="6" height="27" rx="3" fill="url(#scale)"/>
+    <!-- MIN and MAX, cut into the scale rather than drawn beside it -->
+    <g stroke="#0b1220" stroke-width="2.2" stroke-linecap="round" opacity=".9">
+      <path d="M29 38.5h6"/>
+      <path d="M29 47h6"/>
+    </g>
+    <!-- the reading -->
+    <path d="M20.5 34h23" stroke="#4ade80" stroke-width="3.4" stroke-linecap="round"/>
+  </g>
+</svg>
