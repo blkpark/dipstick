@@ -81,6 +81,8 @@ input and cache reads, with the cache hit rate.
 
 Spend is broken out by model, because models do not drain a window at the same rate and a plan can carry a per-model cap of its own alongside the shared one.
 
+That is also how the remaining figure is expressed, where it can be trusted at all: how much is left depends on what you run next, so the panel answers per model — what each one alone would spend to finish the window — and mixing lands somewhere between. The weights come from a non-negative fit of hourly drain against each model's spend, kept only when it explains the window (R² ≥ 0.7). Failing that, a single blended range needs R² ≥ 0.4. Failing both, the panel says so.
+
 It stops short of a "tokens remaining" figure in most places, on purpose.
 Neither vendor publishes how a window's capacity is spent, so the only honest
 conversion is one fitted from finished windows — and dipstick measures how much
