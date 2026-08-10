@@ -182,6 +182,7 @@ struct PanelView: View {
     let lastSyncFailed: Bool
     let onPick: (String) -> Void
     let onMode: (String) -> Void
+    let onBarWindow: (String) -> Void
     let onDashboard: () -> Void
     let onRefresh: () -> Void
     let onQuit: () -> Void
@@ -263,6 +264,28 @@ struct PanelView: View {
                     }
                 }
                 .padding(.top, 10)
+
+                // Which horizon the bar leads with, on its own row: a segmented
+                // control next to the pin toggle overran the 340pt panel. A bar
+                // mixing 7-day and 5-hour columns has to be read twice, so the
+                // axis is a choice rather than whatever each pool happens to bind on.
+                HStack(spacing: 8) {
+                    Text(strings["barWindowLabel"] ?? "Menu bar")
+                        .font(.system(size: 11))
+                    Spacer(minLength: 8)
+                    Picker("", selection: Binding(
+                        get: { snap.barWindow ?? "binds" },
+                        set: { onBarWindow($0) })) {
+                        Text(strings["barBinds"] ?? "binds").tag("binds")
+                        Text(strings["bar5h"] ?? "5h").tag("5h")
+                        Text(strings["bar7d"] ?? "7d").tag("7d")
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .frame(width: 150)
+                }
+                .padding(.top, 7)
             }
         }
     }

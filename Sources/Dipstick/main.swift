@@ -18,6 +18,7 @@ struct Snapshot: Decodable {
     let runningCodex: [Running]
     /// Optional so a snapshot from an older CLI still decodes.
     let mainMode: String?
+    let barWindow: String?
     let nextLaunch: String?
     /// Rendered verbatim. The CLI already localises everything it prints, so the
     /// app borrows those strings instead of formatting its own -- otherwise a
@@ -51,6 +52,7 @@ struct Window: Decodable {
     let resetsIn: String
     let imminent: Bool
     let binds: Bool
+    let minutes: Double?
 }
 
 struct Running: Decodable {
@@ -79,7 +81,7 @@ func shortName(_ sub: String) -> String {
 /// label colour, which macOS flips for a light or dark menu bar, and the state
 /// rides on a small filled dot instead. Drawing to an image rather than hosting a
 /// custom view keeps the normal button behaviour: one click still opens the menu.
-func renderStatus(_ subs: [Subscription], pinned: Bool, appearance: NSAppearance?) -> NSImage {
+func renderStatus(_ subs: [Subscription], pinned: Bool, prefer: String?, appearance: NSAppearance?) -> NSImage {
     // Three variants rendered side by side against the system readouts settled
     // this: the plain sans at semibold matches them exactly, where SF Mono's
     // mechanical glyphs read as heavier than they are and a condensed regular
@@ -101,7 +103,7 @@ func renderStatus(_ subs: [Subscription], pinned: Bool, appearance: NSAppearance
     var columns: [Column] = []
 
     for sub in subs {
-        guard let win = bindingWindow(sub) else { continue }
+        guard let win = bindingWindow(sub, prefer: prefer) else { continue }
         // One figure per column. The dot and the countdown that used to sit here
         // made three things compete in 22 points; the panel has room for both.
         // Pinned mode means this one pool takes every launch; the label says so
@@ -196,8 +198,21 @@ func colour(for state: String) -> NSColor {
 
 /// The window that actually constrains new work: the one `--json` marked as
 /// binding, falling back to the lowest reading.
-func bindingWindow(_ sub: Subscription) -> Window? {
-    sub.windows.first(where: { $0.binds }) ?? sub.windows.min(by: { $0.remaining < $1.remaining })
+/// The window a column leads with. `prefer` pins one horizon so the figures stay
+/// comparable across subscriptions; a subscription that has no window of that
+/// length (Codex meters a 7-day window only) falls back to the constraining one
+/// rather than dropping out of the bar entirely.
+func bindingWindow(_ sub: Subscription, prefer: String? = nil) -> Window? {
+    if let want = prefer, want != "binds" {
+        let target: Double = (want == "5h") ? 300 : 10080
+        let matches = sub.windows.filter { $0.minutes == target }
+        // Account-wide before per-model: a Max plan carries both a 7-day window
+        // and a 7-day Fable cap, and the plan's own figure is the headline.
+        if let hit = matches.first(where: { $0.pool == nil }) ?? matches.first {
+            return hit
+        }
+    }
+    return sub.windows.first(where: { $0.binds }) ?? sub.windows.min(by: { $0.remaining < $1.remaining })
 }
 
 // MARK: - Running the CLI
@@ -305,15 +320,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // work. Every subscription with a reading gets a column — a fourth one
         // costs ~35pt, and the cap of three silently hid Claude, which is exactly
         // the pool whose floor matters most here.
+        let bar = snap.barWindow
         let withData = snap.subscriptions.filter { !$0.windows.isEmpty }
         let ordered = withData.filter(\.isMain)
             + withData.filter { !$0.isMain }
-                .sorted { (bindingWindow($0)?.remaining ?? 101) < (bindingWindow($1)?.remaining ?? 101) }
+                .sorted { (bindingWindow($0, prefer: bar)?.remaining ?? 101)
+                            < (bindingWindow($1, prefer: bar)?.remaining ?? 101) }
         button.title = ""
         button.image = renderStatus(ordered, pinned: snap.mainMode == "pinned",
-                                    appearance: button.effectiveAppearance)
+                                    prefer: bar, appearance: button.effectiveAppearance)
         button.toolTip = ordered.compactMap { sub in
-            bindingWindow(sub).map { "\(sub.sub) · \($0.name) \(Int($0.remaining.rounded()))% · \($0.why)" }
+            bindingWindow(sub, prefer: bar).map { "\(sub.sub) · \($0.name) \(Int($0.remaining.rounded()))% · \($0.why)" }
         }.joined(separator: "\n")
     }
 
@@ -366,6 +383,10 @@ extension AppDelegate {
             },
             onMode: { [weak self] mode in
                 CLI.run(["--main-mode", mode])
+                self?.refresh()
+            },
+            onBarWindow: { [weak self] w in
+                CLI.run(["--bar-window", w])
                 self?.refresh()
             },
             onDashboard: { [weak self] in self?.openDashboard() },

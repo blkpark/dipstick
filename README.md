@@ -131,6 +131,17 @@ graded against this surplus, not against fixed percentages.
 
 Either way it only answers "which one, right now". It still launches nothing.
 
+```sh
+dipstick --bar-window binds|5h|7d   # which window the menu bar leads with
+```
+
+The menu bar shows one figure per subscription, and by default that is whichever
+window actually constrains work — which can mean reading a 5-hour figure next to
+a 7-day one. Pinning `5h` or `7d` keeps the columns on one horizon so they
+compare directly; a subscription that has no window of that length (Codex meters
+a 7-day window only) falls back to its constraining window rather than vanishing
+from the bar. The panel has the same control.
+
 `--vendor codex` pins the **tool** while the account still follows the pick.
 If the main is pinned to a different vendor, the pick stays inside the vendor
 you asked for — what you typed wins. That makes bare `codex` / `claude`
