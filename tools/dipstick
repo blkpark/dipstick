@@ -333,6 +333,16 @@ CREATE TABLE IF NOT EXISTS samples(
 CREATE INDEX IF NOT EXISTS samples_sub_time ON samples(sub, taken_at);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS apicache(key TEXT PRIMARY KEY, fetched_at REAL NOT NULL, body TEXT);
+-- Token spend, bucketed by hour. Local logs only: what this machine did.
+CREATE TABLE IF NOT EXISTS tokens(
+  vendor TEXT NOT NULL, sub TEXT NOT NULL, hour TEXT NOT NULL,
+  input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(vendor, sub, hour));
+-- Ingest bookmark per file: bytes already folded into `tokens`, so a growing
+-- log is only ever read forward from where the last run stopped.
+CREATE TABLE IF NOT EXISTS token_scan(
+  ino INTEGER PRIMARY KEY, offset INTEGER NOT NULL, carry TEXT NOT NULL DEFAULT '');
 """
 
 # The Claude usage endpoint rate-limits polling -- calling it once per run (let
@@ -378,6 +388,175 @@ def cache_put(db, key, body):
                "ON CONFLICT(key) DO UPDATE SET fetched_at=excluded.fetched_at, "
                "body=excluded.body", (key, time.time(), json.dumps(body)))
     db.commit()
+
+
+def _hour(ts):
+    """ISO hour bucket in local time, or None if the stamp is unusable."""
+    try:
+        t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    return t.astimezone().replace(tzinfo=None, minute=0, second=0,
+                                  microsecond=0).isoformat(timespec="hours")
+
+
+def _fold(bucket, vendor, sub, hour, **counts):
+    row = bucket.setdefault((vendor, sub, hour),
+                            {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+    for k, v in counts.items():
+        row[k] += int(v or 0)
+
+
+def ingest_tokens(db):
+    """Fold new log bytes into the hourly token table.
+
+    Every file is read forward from a stored offset, so a session that keeps
+    growing costs only its new bytes. The offset is committed with the counts it
+    produced, which is what keeps a crash from double-counting a window.
+    """
+    marks = {ino: (off, carry) for ino, off, carry
+             in db.execute("SELECT ino,offset,carry FROM token_scan")}
+    bucket, new_marks = {}, []
+
+    for path in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        off, carry = marks.get(st.st_ino, (0, ""))
+        if st.st_size < off:            # truncated or replaced: start over
+            off, carry = 0, ""
+        if st.st_size == off:
+            continue
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(off)
+                chunk = carry.encode() + fh.read()
+                read_to = fh.tell()
+        except OSError:
+            continue
+        lines = chunk.split(b"\n")
+        tail = lines.pop()              # last piece may be a half-written line
+        for line in lines:
+            if b'"usage"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            u = ((d.get("message") or {}).get("usage")) or {}
+            hour = _hour(d.get("timestamp"))
+            if not u or not hour:
+                continue
+            _fold(bucket, "claude", "Claude", hour,
+                  input=u.get("input_tokens"), output=u.get("output_tokens"),
+                  cache_read=u.get("cache_read_input_tokens"),
+                  cache_write=u.get("cache_creation_input_tokens"))
+        new_marks.append((st.st_ino, read_to, tail.decode("utf-8", "ignore")))
+
+    # Codex writes a running total per session, so the per-turn cost is the
+    # delta between records -- last_token_usage is the same number but is absent
+    # from older rollouts, and a delta works for both.
+    plan_of = {}
+    for home in codex_homes():
+        plan = None
+        for f in glob.glob(os.path.join(home, "sessions", "*", "*", "*", "*.jsonl")):
+            plan_of.setdefault(f, plan)
+    for home in codex_homes():
+        for path in glob.glob(os.path.join(home, "sessions", "*", "*", "*", "*.jsonl")):
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            off, carry = marks.get(st.st_ino, (0, ""))
+            if st.st_size < off:
+                off, carry = 0, ""
+            if st.st_size == off:
+                continue
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(off)
+                    chunk = carry.encode() + fh.read()
+                    read_to = fh.tell()
+            except OSError:
+                continue
+            lines = chunk.split(b"\n")
+            tail = lines.pop()
+            prev = None
+            for line in lines:
+                if b'"token_count"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                info = (d.get("payload") or {}).get("info") or {}
+                tot = info.get("total_token_usage") or {}
+                hour = _hour(d.get("timestamp"))
+                if not tot or not hour:
+                    continue
+                cur = {"input": tot.get("input_tokens", 0) - tot.get("cached_input_tokens", 0),
+                       "output": tot.get("output_tokens", 0),
+                       "cache_read": tot.get("cached_input_tokens", 0),
+                       "cache_write": tot.get("cache_write_input_tokens", 0)}
+                if prev is not None:
+                    delta = {k: max(0, cur[k] - prev[k]) for k in cur}
+                    _fold(bucket, "codex", codex_sub_of(path), hour, **delta)
+                prev = cur
+            new_marks.append((st.st_ino, read_to, tail.decode("utf-8", "ignore")))
+
+    if bucket:
+        db.executemany(
+            "INSERT INTO tokens(vendor,sub,hour,input,output,cache_read,cache_write) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(vendor,sub,hour) DO UPDATE SET "
+            "input=input+excluded.input, output=output+excluded.output, "
+            "cache_read=cache_read+excluded.cache_read, "
+            "cache_write=cache_write+excluded.cache_write",
+            [(v, sb, h, c["input"], c["output"], c["cache_read"], c["cache_write"])
+             for (v, sb, h), c in bucket.items()])
+    if new_marks:
+        db.executemany(
+            "INSERT INTO token_scan(ino,offset,carry) VALUES(?,?,?) "
+            "ON CONFLICT(ino) DO UPDATE SET offset=excluded.offset, carry=excluded.carry",
+            new_marks)
+    db.commit()
+
+
+def codex_sub_of(path):
+    """Which Codex subscription a rollout belongs to, by the home it sits under."""
+    for home, claims in _codex_claims():
+        if path.startswith(home.rstrip("/") + "/"):
+            plan = (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type")
+            if plan:
+                return sub_label("Codex", plan)
+    return "Codex"
+
+
+def _token_key(sub):
+    """Ingest cannot know the plan tier cheaply, so Claude spend is banked under
+    a plain vendor key while the rows carry the labelled tier ("Claude Max")."""
+    return "Claude" if sub.startswith("Claude") else sub
+
+
+def tokens_since(db, sub, start):
+    """Totals for one subscription from an hour boundary onward."""
+    sub = _token_key(sub)
+    row = db.execute(
+        "SELECT COALESCE(SUM(input),0), COALESCE(SUM(output),0), "
+        "COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0) "
+        "FROM tokens WHERE sub=? AND hour>=?",
+        (sub, start.replace(minute=0, second=0, microsecond=0).isoformat(timespec="hours"))
+    ).fetchone()
+    return {"input": row[0], "output": row[1], "cache_read": row[2], "cache_write": row[3]}
+
+
+def hourly_tokens(db, sub, start):
+    sub = _token_key(sub)
+    return db.execute(
+        "SELECT hour, input, output, cache_read, cache_write FROM tokens "
+        "WHERE sub=? AND hour>=? ORDER BY hour",
+        (sub, start.replace(minute=0, second=0, microsecond=0).isoformat(timespec="hours"))
+    ).fetchall()
 
 
 def cache_drop(db, key):
@@ -880,6 +1059,10 @@ def collect(db):
     consumers = live_codex()
     rows = codex_rows(db, sum(consumers.values())) + claude_rows(db) + agy_rows()
     record_samples(db, rows)
+    try:
+        ingest_tokens(db)
+    except Exception:
+        pass        # token history is a detail view; never let it block the gauge
     return rows, consumers
 
 
@@ -1174,6 +1357,25 @@ h1{font-size:14px;font-weight:700;margin:0}
 .reserve{margin-top:8px;padding:6px 8px;border-radius:6px;font-size:11px;
  background:color-mix(in srgb,var(--c) 10%,transparent)}
 .note{font-size:11px;color:var(--dim);margin-top:8px}
+.tok{margin-top:10px;padding-top:9px;border-top:1px solid var(--line)}
+.tok h3{margin:0 0 7px;font-size:10px;font-weight:700;letter-spacing:.06em;
+ text-transform:uppercase;color:var(--dim)}
+.tokwin{margin-bottom:11px}
+.tokwin:last-child{margin-bottom:0}
+.tokhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+ font-size:11px;margin-bottom:3px}
+.tokhead b{font-size:12px;font-weight:600}
+.est{font-weight:700}
+.est .q{font-weight:400;color:var(--dim)}
+.spark{width:100%;height:34px;display:block;fill:var(--c,var(--dim));opacity:.85}
+.spark rect:hover{opacity:1;fill:var(--accent)}
+.axis{display:flex;justify-content:space-between;font-size:9.5px;color:var(--dim);
+ margin-top:2px}
+.mix{display:flex;flex-wrap:wrap;gap:3px 10px;font-size:10.5px;color:var(--dim);
+ margin-top:5px}
+.mix b{color:var(--fg);font-weight:600}
+.tokbasis{font-size:10px;color:var(--dim);margin-top:5px;line-height:1.45}
+.tokempty{font-size:11px;color:var(--dim);padding:5px 0}
 form.pick{margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line)}
 form.modesw{display:inline;margin-left:10px}
 .stamp b{color:var(--fg)}
@@ -1209,6 +1411,133 @@ def apply_lang(db, override=None):
     LANG = override or get_setting(db, "lang", "ko") or "ko"
     if LANG not in ("ko", "en"):
         LANG = "ko"
+
+
+MIN_CALIB_PCT = 15.0   # below this the ratio divides by noise, so no estimate
+MAX_SPREAD = 1.0       # past windows disagreeing by more than this: show no number
+
+
+def calibration_spread(db, sub, window, minutes):
+    """How much tokens-per-percent has varied across finished windows.
+
+    The point of measuring it is knowing when not to answer. Neither vendor
+    publishes how a window's capacity is spent, so the only honest conversion is
+    one fitted from past windows -- and the fit is worth showing only if past
+    windows agreed. Measured here: 7-day windows land near 0.6, five-hour windows
+    near 2.2, which is why the short window shows spend and no estimate.
+    """
+    key = _token_key(sub)
+    seen, ratios = set(), []
+    rows = db.execute("SELECT taken_at, remaining, resets_at FROM samples "
+                      "WHERE sub=? AND window=? ORDER BY taken_at", (sub, window)).fetchall()
+    by_reset = {}
+    for _, rem, reset in rows:
+        if reset:
+            by_reset[reset] = rem      # last reading of each window
+    for reset, rem in by_reset.items():
+        used = 100.0 - rem
+        if used < MIN_CALIB_PCT:
+            continue
+        try:
+            end = datetime.datetime.fromisoformat(reset).replace(tzinfo=None)
+        except ValueError:
+            continue
+        start = (end - datetime.timedelta(minutes=minutes)).replace(
+            minute=0, second=0, microsecond=0)
+        got = db.execute(
+            "SELECT COALESCE(SUM(input+output+cache_read+cache_write),0) FROM tokens "
+            "WHERE sub=? AND hour>=? AND hour<?",
+            (key, start.isoformat(timespec="hours"), end.isoformat(timespec="hours"))
+        ).fetchone()[0]
+        if got > 0:
+            ratios.append(got / used)
+    if len(ratios) < 4:
+        return None
+    mean = sum(ratios) / len(ratios)
+    if mean <= 0:
+        return None
+    var = sum((r - mean) ** 2 for r in ratios) / len(ratios)
+    return (var ** 0.5) / mean
+
+
+def token_view(db, sub, windows):
+    """Per-window token spend and, where it can be trusted, what is left.
+
+    The server's weighting is not published, so the ratio is fitted per window
+    instead of assumed: tokens this machine logged since the window opened,
+    divided by the percent the server says was consumed. It self-corrects for
+    spend this machine cannot see -- usage from the web app or another host
+    inflates the denominator and the ratio absorbs it -- as long as that share
+    holds steady. Early in a window the percent is small and the division is
+    mostly noise, so the estimate is withheld rather than guessed.
+    """
+    out = []
+    for w in windows:
+        if not w.get("resets") or not w.get("minutes"):
+            continue
+        start = w["resets"] - datetime.timedelta(minutes=w["minutes"])
+        spent = tokens_since(db, sub, start)
+        total = sum(spent.values())
+        used_pct = 100.0 - w["remaining"]
+        est = per_pct = lo = hi = None
+        spread = calibration_spread(db, sub, w["name"], w["minutes"])
+        if used_pct >= MIN_CALIB_PCT and total > 0:
+            per_pct = total / used_pct
+            if spread is not None and spread <= MAX_SPREAD:
+                est = per_pct * w["remaining"]
+                lo, hi = est * max(0.05, 1 - spread), est * (1 + spread)
+        billable = spent["input"] + spent["output"] + spent["cache_write"]
+        out.append({"window": w, "spent": spent, "total": total, "billable": billable,
+                    "cache_pct": (spent["cache_read"] / total * 100) if total else 0.0,
+                    "per_pct": per_pct, "estimate": est, "lo": lo, "hi": hi,
+                    "spread": spread, "used_pct": used_pct, "start": start,
+                    "hours": hourly_tokens(db, sub, start)})
+    return out
+
+
+def human_tokens(n):
+    for unit, size in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return f"{n:.0f}"
+
+
+def spark(hours, minutes):
+    """Hourly spend as an inline bar chart.
+
+    Bars, not a line: the buckets are discrete hours, and a line between them
+    would imply a rate that was never measured. Every bar carries its own title
+    so the exact figure is reachable without a tooltip library, and the whole
+    chart carries a text summary for readers that never see it.
+    """
+    if not hours:
+        return ""
+    vals = [(h[0], h[1] + h[2] + h[3] + h[4]) for h in hours]
+    peak = max(v for _, v in vals) or 1
+    step = max(1, len(vals) // 60)          # keep bars legible on a 7-day window
+    if step > 1:
+        merged = []
+        for i in range(0, len(vals), step):
+            chunk = vals[i:i + step]
+            merged.append((chunk[0][0], sum(v for _, v in chunk)))
+        vals, peak = merged, max(v for _, v in merged) or 1
+    w, gap = 100.0 / max(len(vals), 1), 0.18
+    bars = []
+    for i, (hour, v) in enumerate(vals):
+        h = max(1.5, v / peak * 100)
+        label = hour[11:16] if minutes <= 1440 else hour[5:10]
+        bars.append(f'<rect x="{i * w + w * gap / 2:.3f}" y="{100 - h:.2f}" '
+                    f'width="{w * (1 - gap):.3f}" height="{h:.2f}" rx="0.4">'
+                    f'<title>{label} · {human_tokens(v)}</title></rect>')
+    first = vals[0][0][5:16].replace("T", " ")
+    last = vals[-1][0][5:16].replace("T", " ")
+    summary = L(f"{first}부터 {last}까지 시간대별 토큰, 최대 {human_tokens(peak)}",
+                f"tokens by hour from {first} to {last}, peak {human_tokens(peak)}")
+    return (f'<svg class="spark" viewBox="0 0 100 100" preserveAspectRatio="none" '
+            f'role="img" aria-label="{esc(summary)}">{"".join(bars)}</svg>'
+            f'<div class="axis"><span>{esc(first)}</span>'
+            f'<span>{L("최대", "peak")} {human_tokens(peak)}</span>'
+            f'<span>{esc(last)}</span></div>')
 
 
 def render_html(db, rows, consumers, path=None, interactive=False):
@@ -1312,6 +1641,64 @@ def render_html(db, rows, consumers, path=None, interactive=False):
                     f'{esc(why)}</span></div>{reset_row}{pace}</div>')
             if r.get("note"):
                 p.append(f'<div class="note">{esc(r["note"])}</div>')
+        tv = token_view(db, sub, [w for r in group for w in r["windows"]])
+        if tv:
+            p.append(f'<div class="tok"><h3>{L("토큰 사용량 (이 컴퓨터 기록)", "Tokens (this machine)")}</h3>')
+            for t in tv:
+                w = t["window"]
+                p.append(f'<div class="tokwin" data-s="{w["verdict"][0]}">'
+                         f'<div class="tokhead"><span>{esc(w["name"])}</span>')
+                if t["estimate"] is not None:
+                    p.append(f'<span class="est">{L("남은 토큰 대략", "roughly left")} '
+                             f'<b>{human_tokens(t["lo"])}\u2013{human_tokens(t["hi"])}</b></span>')
+                elif t["used_pct"] < MIN_CALIB_PCT:
+                    p.append(f'<span class="est q">'
+                             f'{L("창 초반 — 환산 보류", "too early in the window")}</span>')
+                else:
+                    p.append(f'<span class="est q">'
+                             f'{L("환산 불가", "not convertible")}</span>')
+                p.append('</div>')
+                if t["total"]:
+                    p.append(spark(t["hours"], w["minutes"]))
+                    p.append(f'<div class="mix">'
+                             f'<span>{L("사용", "spent")} <b>{human_tokens(t["total"])}</b></span>'
+                             f'<span>{L("출력", "output")} <b>{human_tokens(t["spent"]["output"])}</b></span>'
+                             f'<span>{L("신규 입력", "fresh input")} <b>{human_tokens(t["billable"] - t["spent"]["output"])}</b></span>'
+                             f'<span>{L("캐시 적중", "cache hits")} <b>{t["cache_pct"]:.0f}%</b></span>'
+                             f'</div>')
+                else:
+                    p.append(f'<div class="tokempty">'
+                             f'{L("이 창에서 이 컴퓨터가 기록한 사용 없음", "nothing logged on this machine in this window")}'
+                             f'</div>')
+                if t["per_pct"]:
+                    per = human_tokens(t["per_pct"])
+                    sp = t["spread"]
+                    if t["estimate"] is not None:
+                        basis = L(f"이 창 1%당 {per} 토큰. 지난 창들끼리 ±{sp * 100:.0f}% 어긋나 "
+                                  f"그만큼을 범위로 붙였다. 어느 벤더도 창 용량이 어떻게 소모되는지 "
+                                  f"공개하지 않아, 지난 창에서 맞춘 환산이 유일하게 정직한 방법이다.",
+                                  f"{per} tokens per 1% in this window. Past windows disagree by "
+                                  f"±{sp * 100:.0f}%, which is the range shown. Neither vendor "
+                                  f"publishes how a window's capacity is spent, so a fit over past "
+                                  f"windows is the only honest conversion.")
+                    elif sp is None:
+                        basis = L(f"이 창 1%당 {per} 토큰. 끝난 창 표본이 아직 적어 오차를 "
+                                  f"못 재므로 숫자를 내지 않는다.",
+                                  f"{per} tokens per 1% here. Too few finished windows to measure "
+                                  f"the error, so no figure is given.")
+                    else:
+                        basis = L(f"이 창 1%당 {per} 토큰. 다만 지난 창들끼리 ±{sp * 100:.0f}% "
+                                  f"어긋나 환산이 성립하지 않는다 — 캐시 읽기가 토큰 수의 대부분인데 "
+                                  f"한도에는 거의 안 잡히고, 그 비중이 창마다 달라지기 때문이다. "
+                                  f"남은 양은 위의 % 와 회복 시각으로 본다.",
+                                  f"{per} tokens per 1% here, but past windows disagree by "
+                                  f"±{sp * 100:.0f}%, so the conversion does not hold: cache reads "
+                                  f"are most of the token count and almost none of the limit, and "
+                                  f"their share moves window to window. Read what is left from the "
+                                  f"percentage and reset time above.")
+                    p.append(f'<div class="tokbasis">{esc(basis)}</div>')
+                p.append('</div>')
+            p.append('</div>')
         if interactive and sub in selectable:
             over = bool(rs and rs[0] == "BLOCKED")
             target = "auto" if is_main else sub_key(sub)

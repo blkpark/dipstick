@@ -73,6 +73,24 @@ $(dipstick --main-cmd) "$(cat prompt.txt)"
 # -> env CODEX_HOME="…/codex-accounts/…/home" codex "$(cat prompt.txt)"
 ```
 
+## Tokens
+
+The dashboard also shows what this machine actually spent, read from the same
+local logs: tokens per hour in the current window, split into output, fresh
+input and cache reads, with the cache hit rate.
+
+It stops short of a "tokens remaining" figure in most places, on purpose.
+Neither vendor publishes how a window's capacity is spent, so the only honest
+conversion is one fitted from finished windows — and dipstick measures how much
+those windows disagree before quoting anything. Where they agree well enough the
+figure appears as a range with that spread attached; where they don't, the panel
+says so and points back at the percentage, which is exact. Measured here, 7-day
+windows land near ±60% and five-hour windows near ±200%, so the short window
+shows spend and no estimate.
+
+The reason is visible in the numbers: cache reads are ~97% of the token count
+and almost none of the limit, and their share moves from window to window.
+
 ## How it decides what's a problem
 
 **Time-to-recovery, not the raw percentage.** 30% left on a 5-hour window and 30%
