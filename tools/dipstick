@@ -1767,9 +1767,9 @@ def render_html(db, rows, consumers, path=None, interactive=False):
 
     for sub, account, group in groups:
         is_main = sub == main
+        badge = f'<span class="mainbadge">{L("메인", "MAIN")}</span>' if is_main else ""
         p.append(f'<section class="card{" ismain" if is_main else ""}"><div class="card-head">'
-                 f'<span class="sub">{vendor_icon(sub)}{esc(sub)}'
-                 f'{f'<span class="mainbadge">{L("메인", "MAIN")}</span>' if is_main else ""}</span>'
+                 f'<span class="sub">{vendor_icon(sub)}{esc(sub)}{badge}</span>'
                  f'<span class="who">{esc(account)}</span></div>')
         pol = policy_of(sub)
         if pol:
@@ -1847,18 +1847,19 @@ def render_html(db, rows, consumers, path=None, interactive=False):
                         p.append(f'<div class="mrow"><span class="mname">{esc(name)}</span>'
                                  f'<b>{human_tokens(left)}</b></div>')
                     p.append('</div>')
-                    p.append(f'<div class="tokbasis">{esc(L(
-                        f"이 모델만 써서 창을 다 태울 때의 양. 시간대별 소모를 모델별로 갈라 "
-                        f"맞췄고 설명력 R²={t["fit"]["r2"]:.2f}. 섞어 쓰면 그 사이 어딘가다.",
-                        f"what each model alone would spend to finish the window. Fitted per "
-                        f"model against hourly drain, R²={t["fit"]["r2"]:.2f}. Mixing lands "
-                        f"somewhere between."))}</div>')
+                    r2 = t["fit"]["r2"]
+                    why = L(f"이 모델만 써서 창을 다 태울 때의 양. 시간대별 소모를 모델별로 "
+                            f"갈라 맞췄고 설명력 R²={r2:.2f}. 섞어 쓰면 그 사이 어딘가다.",
+                            f"what each model alone would spend to finish the window. Fitted "
+                            f"per model against hourly drain, R²={r2:.2f}. Mixing lands "
+                            f"somewhere between.")
+                    p.append(f'<div class="tokbasis">{esc(why)}</div>')
                 if not t["complete"]:
-                    p.append(f'<div class="tokbasis">'
-                             f'{esc(L("과거 기록을 아직 읽는 중이라 사용량이 실제보다 적게 나온다. "
-                                     "몇 번 더 새로고침하면 채워진다.",
-                                     "Older logs are still being read, so the spend shown is short. "
-                                     "A few more refreshes will fill it in."))}</div>')
+                    catching = L("과거 기록을 아직 읽는 중이라 사용량이 실제보다 적게 나온다. "
+                                 "몇 번 더 새로고침하면 채워진다.",
+                                 "Older logs are still being read, so the spend shown is short. "
+                                 "A few more refreshes will fill it in.")
+                    p.append(f'<div class="tokbasis">{esc(catching)}</div>')
                 elif t["per_pct"]:
                     per = human_tokens(t["per_pct"])
                     sp = t["spread"]

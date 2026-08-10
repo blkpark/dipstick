@@ -337,16 +337,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: menu actions
 
     @objc func openDashboard() {
-        guard let url = URL(string: "http://127.0.0.1:\(serverPort)/") else { return }
-        // Start a server only if nothing answers; --serve is meant to be on demand.
-        if !portIsOpen(serverPort), let path = CLI.path {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: path)
-            task.arguments = ["--serve", String(serverPort)]
-            try? task.run()
-            Thread.sleep(forTimeInterval: 1.2)
+        // A live page when one is already being served, a written file otherwise.
+        // Spawning a server to read a page left a process running for the rest of
+        // the session, which is a lot of machinery for a detail view -- and the
+        // fixed wait before opening the URL raced the bind often enough to land
+        // on a connection error. The file needs nothing running at all.
+        if portIsOpen(serverPort),
+           let url = URL(string: "http://127.0.0.1:\(serverPort)/") {
+            NSWorkspace.shared.open(url)
+            return
         }
-        NSWorkspace.shared.open(url)
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dipstick-dashboard.html")
+        guard CLI.run(["--html", out.path]) != nil,
+              FileManager.default.fileExists(atPath: out.path) else { return }
+        NSWorkspace.shared.open(out)
     }
 
     private func portIsOpen(_ port: Int) -> Bool {

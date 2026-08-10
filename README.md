@@ -57,7 +57,7 @@ the same token instead of racing over rotations. Only a reading that says
 
 ```sh
 dipstick                    # text report
-dipstick --serve            # web UI on 127.0.0.1:8787, click to set main
+dipstick --serve            # optional live web UI on 127.0.0.1:8787, click to set main
 dipstick --html out.html    # self-contained page, no server
 dipstick --json             # machine-readable snapshot
 dipstick --set-main claude-max   # or any key from --json, or "auto"
