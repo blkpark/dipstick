@@ -335,10 +335,11 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS apicache(key TEXT PRIMARY KEY, fetched_at REAL NOT NULL, body TEXT);
 -- Token spend, bucketed by hour. Local logs only: what this machine did.
 CREATE TABLE IF NOT EXISTS tokens(
-  vendor TEXT NOT NULL, sub TEXT NOT NULL, hour TEXT NOT NULL,
+  vendor TEXT NOT NULL, sub TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
+  hour TEXT NOT NULL,
   input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
   cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(vendor, sub, hour));
+  PRIMARY KEY(vendor, sub, model, hour));
 -- Ingest bookmark per file: bytes already folded into `tokens`, so a growing
 -- log is only ever read forward from where the last run stopped.
 CREATE TABLE IF NOT EXISTS token_scan(
@@ -354,6 +355,12 @@ CLAUDE_TTL = 300.0   # measured: this endpoint 429s well before a per-run poll
 def connect():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     db = sqlite3.connect(DB_PATH, timeout=10)
+    # Token rows predating the model axis cannot be split after the fact, and a
+    # per-model cap calibrated against every model's spend is worse than no
+    # figure. The logs are still on disk, so the cheap fix is to re-read them.
+    cols = [r[1] for r in db.execute("PRAGMA table_info(tokens)")]
+    if cols and "model" not in cols:
+        db.executescript("DROP TABLE tokens; DROP TABLE token_scan;")
     db.executescript(SCHEMA)
     return db
 
@@ -400,11 +407,15 @@ def _hour(ts):
                                   microsecond=0).isoformat(timespec="hours")
 
 
-def _fold(bucket, vendor, sub, hour, **counts):
-    row = bucket.setdefault((vendor, sub, hour),
+def _fold(bucket, vendor, sub, model, hour, **counts):
+    row = bucket.setdefault((vendor, sub, model, hour),
                             {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
     for k, v in counts.items():
         row[k] += int(v or 0)
+
+
+INGEST_BUDGET = 96 * 1024 * 1024   # bytes of log a single run may read
+TOKEN_HISTORY_DAYS = 21            # keep a little past the widest window
 
 
 def ingest_tokens(db):
@@ -413,12 +424,38 @@ def ingest_tokens(db):
     Every file is read forward from a stored offset, so a session that keeps
     growing costs only its new bytes. The offset is committed with the counts it
     produced, which is what keeps a crash from double-counting a window.
+
+    The run is also given a byte budget, because this sits behind the gauge: a
+    first pass over months of logs is several gigabytes and once blocked every
+    reading for eight minutes. Bookmarks make an interrupted pass resumable, so
+    a bounded slice per run catches up over a few refreshes and no single one
+    stalls. Newest files go first -- the current window is the part anyone is
+    looking at.
     """
+    budget = INGEST_BUDGET
     marks = {ino: (off, carry) for ino, off, carry
              in db.execute("SELECT ino,offset,carry FROM token_scan")}
     bucket, new_marks = {}, []
 
-    for path in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
+    # Only the recent past is ever read back: the widest window is seven days and
+    # the spread is fitted over finished ones. Months of older rollouts are
+    # gigabytes that nothing on screen would use.
+    floor = (now - datetime.timedelta(days=TOKEN_HISTORY_DAYS)).timestamp()
+
+    def newest(paths):
+        out = []
+        for f in paths:
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            if st.st_mtime >= floor:
+                out.append((st.st_mtime, f))
+        return [f for _, f in sorted(out, reverse=True)]
+
+    for path in newest(glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl"))):
+        if budget <= 0:
+            break
         try:
             st = os.stat(path)
         except OSError:
@@ -431,10 +468,11 @@ def ingest_tokens(db):
         try:
             with open(path, "rb") as fh:
                 fh.seek(off)
-                chunk = carry.encode() + fh.read()
+                chunk = carry.encode() + fh.read(budget)
                 read_to = fh.tell()
         except OSError:
             continue
+        budget -= max(0, read_to - off)
         lines = chunk.split(b"\n")
         tail = lines.pop()              # last piece may be a half-written line
         for line in lines:
@@ -444,11 +482,12 @@ def ingest_tokens(db):
                 d = json.loads(line)
             except ValueError:
                 continue
-            u = ((d.get("message") or {}).get("usage")) or {}
+            msg = d.get("message") or {}
+            u = msg.get("usage") or {}
             hour = _hour(d.get("timestamp"))
             if not u or not hour:
                 continue
-            _fold(bucket, "claude", "Claude", hour,
+            _fold(bucket, "claude", "Claude", msg.get("model") or "", hour,
                   input=u.get("input_tokens"), output=u.get("output_tokens"),
                   cache_read=u.get("cache_read_input_tokens"),
                   cache_write=u.get("cache_creation_input_tokens"))
@@ -463,7 +502,11 @@ def ingest_tokens(db):
         for f in glob.glob(os.path.join(home, "sessions", "*", "*", "*", "*.jsonl")):
             plan_of.setdefault(f, plan)
     for home in codex_homes():
-        for path in glob.glob(os.path.join(home, "sessions", "*", "*", "*", "*.jsonl")):
+        if budget <= 0:
+            break
+        for path in newest(glob.glob(os.path.join(home, "sessions", "*", "*", "*", "*.jsonl"))):
+            if budget <= 0:
+                break
             try:
                 st = os.stat(path)
             except OSError:
@@ -476,14 +519,37 @@ def ingest_tokens(db):
             try:
                 with open(path, "rb") as fh:
                     fh.seek(off)
-                    chunk = carry.encode() + fh.read()
+                    chunk = carry.encode() + fh.read(budget)
                     read_to = fh.tell()
             except OSError:
                 continue
+            budget -= max(0, read_to - off)
             lines = chunk.split(b"\n")
             tail = lines.pop()
-            prev = None
+            # Orca hardlinks session directories across Codex homes, so the same
+            # rollout answers to a path under either account and the path cannot
+            # say who spent it. The rate-limit records inside carry plan_type,
+            # which is the same signal the gauge already separates accounts by.
+            prev, model, plan = None, "", None
             for line in lines:
+                if plan is None and b'"rate_limits"' in line:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        rec = None
+                    if isinstance(rec, dict):
+                        rl = (rec.get("payload") or {}).get("rate_limits") or {}
+                        if rl.get("limit_id") == "codex" and rl.get("plan_type"):
+                            plan = rl["plan_type"]
+                if b'"model"' in line and b'"token_count"' not in line:
+                    try:
+                        seen = json.loads(line)
+                    except ValueError:
+                        seen = None
+                    if isinstance(seen, dict):
+                        found = (seen.get("payload") or {}).get("model") or seen.get("model")
+                        if isinstance(found, str):
+                            model = found
                 if b'"token_count"' not in line:
                     continue
                 try:
@@ -501,24 +567,30 @@ def ingest_tokens(db):
                        "cache_write": tot.get("cache_write_input_tokens", 0)}
                 if prev is not None:
                     delta = {k: max(0, cur[k] - prev[k]) for k in cur}
-                    _fold(bucket, "codex", codex_sub_of(path), hour, **delta)
+                    _fold(bucket, "codex", sub_label("Codex", plan) if plan else codex_sub_of(path),
+                          model or "", hour, **delta)
                 prev = cur
             new_marks.append((st.st_ino, read_to, tail.decode("utf-8", "ignore")))
 
     if bucket:
         db.executemany(
-            "INSERT INTO tokens(vendor,sub,hour,input,output,cache_read,cache_write) "
-            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(vendor,sub,hour) DO UPDATE SET "
+            "INSERT INTO tokens(vendor,sub,model,hour,input,output,cache_read,cache_write) "
+            "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(vendor,sub,model,hour) DO UPDATE SET "
             "input=input+excluded.input, output=output+excluded.output, "
             "cache_read=cache_read+excluded.cache_read, "
             "cache_write=cache_write+excluded.cache_write",
-            [(v, sb, h, c["input"], c["output"], c["cache_read"], c["cache_write"])
-             for (v, sb, h), c in bucket.items()])
+            [(v, sb, md, h, c["input"], c["output"], c["cache_read"], c["cache_write"])
+             for (v, sb, md, h), c in bucket.items()])
     if new_marks:
         db.executemany(
             "INSERT INTO token_scan(ino,offset,carry) VALUES(?,?,?) "
             "ON CONFLICT(ino) DO UPDATE SET offset=excluded.offset, carry=excluded.carry",
             new_marks)
+    # A run that stopped on the budget left logs unread, so the spend on screen
+    # is short by an unknown amount. Estimates stay off until a pass finishes
+    # with budget to spare -- an undercount would read as spare capacity, which
+    # is the one direction a quota gauge must never be wrong in.
+    set_setting(db, "tokens_complete", "1" if budget > 0 else "")
     db.commit()
 
 
@@ -1480,8 +1552,9 @@ def token_view(db, sub, windows):
         total = sum(spent.values())
         used_pct = 100.0 - w["remaining"]
         est = per_pct = lo = hi = None
-        spread = calibration_spread(db, sub, w["name"], w["minutes"])
-        if used_pct >= MIN_CALIB_PCT and total > 0:
+        complete = bool(get_setting(db, "tokens_complete", ""))
+        spread = calibration_spread(db, sub, w["name"], w["minutes"]) if complete else None
+        if complete and used_pct >= MIN_CALIB_PCT and total > 0:
             per_pct = total / used_pct
             if spread is not None and spread <= MAX_SPREAD:
                 est = per_pct * w["remaining"]
@@ -1490,6 +1563,7 @@ def token_view(db, sub, windows):
         out.append({"window": w, "spent": spent, "total": total, "billable": billable,
                     "cache_pct": (spent["cache_read"] / total * 100) if total else 0.0,
                     "per_pct": per_pct, "estimate": est, "lo": lo, "hi": hi,
+                    "complete": complete,
                     "spread": spread, "used_pct": used_pct, "start": start,
                     "hours": hourly_tokens(db, sub, start)})
     return out
@@ -1651,6 +1725,9 @@ def render_html(db, rows, consumers, path=None, interactive=False):
                 if t["estimate"] is not None:
                     p.append(f'<span class="est">{L("남은 토큰 대략", "roughly left")} '
                              f'<b>{human_tokens(t["lo"])}\u2013{human_tokens(t["hi"])}</b></span>')
+                elif not t["complete"]:
+                    p.append(f'<span class="est q">'
+                             f'{L("기록 읽는 중", "still reading the logs")}</span>')
                 elif t["used_pct"] < MIN_CALIB_PCT:
                     p.append(f'<span class="est q">'
                              f'{L("창 초반 — 환산 보류", "too early in the window")}</span>')
@@ -1670,7 +1747,13 @@ def render_html(db, rows, consumers, path=None, interactive=False):
                     p.append(f'<div class="tokempty">'
                              f'{L("이 창에서 이 컴퓨터가 기록한 사용 없음", "nothing logged on this machine in this window")}'
                              f'</div>')
-                if t["per_pct"]:
+                if not t["complete"]:
+                    p.append(f'<div class="tokbasis">'
+                             f'{esc(L("과거 기록을 아직 읽는 중이라 사용량이 실제보다 적게 나온다. "
+                                     "몇 번 더 새로고침하면 채워진다.",
+                                     "Older logs are still being read, so the spend shown is short. "
+                                     "A few more refreshes will fill it in."))}</div>')
+                elif t["per_pct"]:
                     per = human_tokens(t["per_pct"])
                     sp = t["spread"]
                     if t["estimate"] is not None:

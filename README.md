@@ -79,6 +79,8 @@ The dashboard also shows what this machine actually spent, read from the same
 local logs: tokens per hour in the current window, split into output, fresh
 input and cache reads, with the cache hit rate.
 
+Spend is broken out by model, because models do not drain a window at the same rate and a plan can carry a per-model cap of its own alongside the shared one.
+
 It stops short of a "tokens remaining" figure in most places, on purpose.
 Neither vendor publishes how a window's capacity is spent, so the only honest
 conversion is one fitted from finished windows — and dipstick measures how much
