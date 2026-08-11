@@ -8,6 +8,7 @@
 
 import AppKit
 import SwiftUI
+import UserNotifications
 
 // MARK: - Snapshot decoded from `dipstick --json`
 
@@ -263,10 +264,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var refreshing = false
     var lastSync: Date?
     var lastSyncFailed = false
+    // Alerts fire on state *transitions*, never on repeated polls: the map of
+    // last-seen states is the debounce. Empty until the first snapshot lands,
+    // so launching the app into an already-low pool stays quiet -- the alert is
+    // for the moment things change, not for the standing situation.
+    var lastStates: [String: String] = [:]
+    var alertsOn: Bool {
+        get { UserDefaults.standard.object(forKey: "alerts") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "alerts") }
+    }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         item.button?.target = self
         item.button?.action = #selector(togglePanel)
+        if alertsOn {
+            UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
         refresh()
         // Five minutes: the Claude endpoint rate-limits polling and the CLI caches
         // its response for the same interval, so anything faster only burns CPU.
@@ -289,7 +303,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.refreshing = false
                 self.lastSyncFailed = (snap == nil)
-                if snap != nil {
+                if let snap {
+                    self.notifyTransitions(snap)
                     self.snapshot = snap    // a failed run keeps the last good numbers
                     self.lastSync = Date()
                 }
@@ -297,6 +312,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.repaint()
             }
         }
+    }
+
+    /// Compare the constraining window per subscription against last poll and
+    /// post an alert only when the state crosses in or out of trouble. STALE is
+    /// excluded on both sides: an aged reading changing is not news.
+    private func notifyTransitions(_ snap: Snapshot) {
+        let strings = snap.strings ?? [:]
+        var seen: [String: String] = [:]
+        for sub in snap.subscriptions {
+            guard let win = bindingWindow(sub) else { continue }
+            let state = win.state
+            seen[sub.sub] = state
+            guard alertsOn, let prev = lastStates[sub.sub],
+                  prev != state, prev != "STALE", state != "STALE" else { continue }
+            let bad = ["LOW", "BLOCKED"]
+            var title: String?
+            var bodyKey: String?
+            if bad.contains(state) && !bad.contains(prev) {
+                title = strings[state == "BLOCKED" ? "notifBlockedTitle" : "notifLowTitle"]
+                bodyKey = "notifLowBody"
+            } else if bad.contains(prev) && !bad.contains(state) {
+                title = strings["notifRecoveredTitle"]
+                bodyKey = "notifRecoveredBody"
+            }
+            guard let title, let bodyKey else { continue }
+            let body = (strings[bodyKey] ?? "{sub} {win} {pct}%")
+                .replacingOccurrences(of: "{sub}", with: sub.sub)
+                .replacingOccurrences(of: "{win}", with: win.name)
+                .replacingOccurrences(of: "{pct}", with: String(Int(win.remaining.rounded())))
+                .replacingOccurrences(of: "{reset}", with: win.resetsIn)
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            // One identifier per subscription: a newer alert replaces a stale
+            // one instead of stacking a history nobody asked for.
+            let req = UNNotificationRequest(
+                identifier: "dipstick-\(sub.sub)", content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(req)
+        }
+        lastStates = seen
     }
 
     private func repaint() {
@@ -395,6 +450,16 @@ extension AppDelegate {
                 self?.refresh()
             },
             onDashboard: { [weak self] in self?.openDashboard() },
+            alertsOn: alertsOn,
+            onAlerts: { [weak self] on in
+                guard let self else { return }
+                self.alertsOn = on
+                if on {
+                    UNUserNotificationCenter.current()
+                        .requestAuthorization(options: [.alert, .sound]) { _, _ in }
+                }
+                self.repaint()
+            },
             onRefresh: { [weak self] in self?.refresh() },
             onQuit: { NSApp.terminate(nil) })
         let hosting = NSHostingView(rootView: view)

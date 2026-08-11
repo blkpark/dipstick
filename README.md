@@ -89,6 +89,14 @@ $(dipstick --main-cmd) "$(cat prompt.txt)"
 # -> env CODEX_HOME="…/codex-accounts/…/home" codex "$(cat prompt.txt)"
 ```
 
+## Alerts
+
+The app posts a macOS notification when a subscription's constraining window
+*crosses* into LOW/BLOCKED — and, the one people actually wait for, when it
+recovers. Transitions only: launching into an already-low pool stays quiet, and
+five polls of the same bad news produce one alert, not five. Toggle in the
+panel footer; stale readings never trigger either edge.
+
 ## MCP — let your agent read the gauge
 
 `mcp/dipstick-mcp` is an MCP stdio server over the same CLI, so any MCP-capable

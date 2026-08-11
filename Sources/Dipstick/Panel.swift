@@ -184,6 +184,8 @@ struct PanelView: View {
     let onMode: (String) -> Void
     let onBarWindow: (String) -> Void
     let onDashboard: () -> Void
+    let alertsOn: Bool
+    let onAlerts: (Bool) -> Void
     let onRefresh: () -> Void
     let onQuit: () -> Void
 
@@ -339,6 +341,10 @@ struct PanelView: View {
             Divider().padding(.top, 10).padding(.bottom, 8)
             HStack(spacing: 14) {
                 Button(strings["openDashboard"] ?? "Open dashboard…", action: onDashboard)
+                Toggle(isOn: Binding(get: { alertsOn }, set: { onAlerts($0) })) {
+                    Text(strings["notifications"] ?? "Alerts").font(.system(size: 11))
+                }
+                .toggleStyle(.checkbox)
                 if refreshing {
                     HStack(spacing: 5) {
                         ProgressView().controlSize(.small)
