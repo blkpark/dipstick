@@ -2065,6 +2065,42 @@ def main(argv):
             print(L(f"bar-window = {want}", f"bar-window = {want}"))
             return 0
 
+        if "--statusline" in args:
+            # One line for a shell prompt or tmux bar: per subscription, the
+            # figure of whichever window the menu bar leads with, coloured only
+            # when something is actually wrong. Prompts redraw constantly, so
+            # this must stay instant and quiet -- it reads whatever the last
+            # refresh knew and never blocks on the network (the app or any
+            # normal run keeps that fresh).
+            rows, _ = collect(db)
+            bar = get_setting(db, "bar_window", "binds")
+            main_name = get_setting(db, "main")
+            plain = "--no-color" in args or not sys.stdout.isatty()
+            parts = []
+            for sub, account, group in group_by_subscription(rows, main_name):
+                wins = [w for r in group for w in r["windows"]]
+                if not wins:
+                    continue
+                win = None
+                if bar != "binds":
+                    target = 300 if bar == "5h" else 10080
+                    scoped = [w for w in wins if w.get("minutes") == target]
+                    win = next((w for w in scoped if not w.get("pool")),
+                               scoped[0] if scoped else None)
+                if win is None:
+                    win = next((w for w in wins if w.get("binds")), None)                         or min(wins, key=lambda w: w["remaining"])
+                label = sub.split()[-1] if sub.split()[-1] != sub.split()[0] else sub.split()[0]
+                state = win["verdict"][0]
+                stale = state == "STALE"
+                pct = f"{win['remaining']:.0f}%" + ("?" if stale else "")
+                if not plain and state in ("LOW", "BLOCKED"):
+                    color = "31" if state == "BLOCKED" else "33"
+                    pct = f"\033[{color}m{pct}\033[0m"
+                star = "*" if sub == main_name else ""
+                parts.append(f"{label}{star} {pct}")
+            print(" | ".join(parts) if parts else "dipstick: no readings")
+            return 0
+
         if "--main-cmd" in args:
             vendor = None
             if "--vendor" in args:

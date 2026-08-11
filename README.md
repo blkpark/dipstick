@@ -65,7 +65,21 @@ dipstick --json             # machine-readable snapshot
 dipstick --set-main claude-max   # or any key from --json, or "auto"
 dipstick --main-cmd         # launch prefix for whatever is main right now
 dipstick --lang ko|en       # Korean or English (the web UI has a switch)
+dipstick --statusline       # one line for a shell prompt or tmux bar
 ```
+
+`--statusline` prints one line — per subscription, the window the menu bar
+leads with, the main starred, colour only on LOW/BLOCKED, `%?` when the reading
+is stale:
+
+```
+ProLite* 100% | Max 47% | Pro 97%
+```
+
+A run takes about a second (it refreshes the gauge), so wire it to something
+that polls rather than something that blocks: `status-interval 15` in tmux, or
+an async prompt segment. Piped output drops colour automatically (`--no-color`
+forces it).
 
 `--main-cmd` is the point of the "main" setting. Pick a subscription once, then
 let your launch command ask which one to use instead of hardcoding it:
