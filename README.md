@@ -108,8 +108,9 @@ claude mcp add dipstick -- ~/.local/bin/dipstick-mcp
 ```
 
 Three tools, all read-only: `quota_status` (everything, with pace and reserve
-state), `can_i_start(minutes)` (GO / WAIT-with-recovery-time / NO_DATA — never a
-downgrade suggestion), and `which_subscription` (what an anonymous launch would
+state), `can_i_start(minutes, model?)` (GO / WAIT-with-recovery-time / NO_DATA —
+never a downgrade suggestion; `model` narrows judgement to that model's scoped
+windows plus the shared ones it drains), and `which_subscription` (what an anonymous launch would
 ride — the name only, no command line). The tool descriptions carry the reading
 discipline, so an agent quoting them inherits the pace/imminent/stale rules
 instead of re-deriving them wrong. Launching stays with whatever tooling you
