@@ -104,8 +104,19 @@ agent (Claude Code, Codex, Cursor…) can ask before starting a long job:
 
 ```sh
 install -m 755 mcp/dipstick-mcp ~/.local/bin/dipstick-mcp
-claude mcp add dipstick -- ~/.local/bin/dipstick-mcp
+
+# Claude Code
+claude mcp add --scope user dipstick -- ~/.local/bin/dipstick-mcp
+
+# Codex
+codex mcp add dipstick -- ~/.local/bin/dipstick-mcp
+
+# Antigravity (and other Gemini-family CLIs) — ~/.gemini/config/mcp_config.json:
+#   { "mcpServers": { "dipstick": { "command": "~/.local/bin/dipstick-mcp", "args": [] } } }
 ```
+
+Any other MCP-capable client registers the same way: a stdio server at
+`~/.local/bin/dipstick-mcp`, no arguments, no environment.
 
 Three tools, all read-only: `quota_status` (everything, with pace and reserve
 state), `can_i_start(minutes, model?)` (GO / WAIT-with-recovery-time / NO_DATA —
