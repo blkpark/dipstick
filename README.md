@@ -75,6 +75,24 @@ $(dipstick --main-cmd) "$(cat prompt.txt)"
 # -> env CODEX_HOME="…/codex-accounts/…/home" codex "$(cat prompt.txt)"
 ```
 
+## MCP — let your agent read the gauge
+
+`mcp/dipstick-mcp` is an MCP stdio server over the same CLI, so any MCP-capable
+agent (Claude Code, Codex, Cursor…) can ask before starting a long job:
+
+```sh
+install -m 755 mcp/dipstick-mcp ~/.local/bin/dipstick-mcp
+claude mcp add dipstick -- ~/.local/bin/dipstick-mcp
+```
+
+Three tools, all read-only: `quota_status` (everything, with pace and reserve
+state), `can_i_start(minutes)` (GO / WAIT-with-recovery-time / NO_DATA — never a
+downgrade suggestion), and `which_subscription` (what an anonymous launch would
+ride — the name only, no command line). The tool descriptions carry the reading
+discipline, so an agent quoting them inherits the pace/imminent/stale rules
+instead of re-deriving them wrong. Launching stays with whatever tooling you
+already trust; the server has no tool that acts.
+
 ## Tokens
 
 The dashboard also shows what this machine actually spent, read from the same

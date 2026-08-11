@@ -16,6 +16,7 @@ ln -s /Applications "$stage/Applications"
 mkdir "$stage/CLI"
 cp "$root/tools/dipstick" "$stage/CLI/dipstick"
 cp "$root/scripts/install-login.sh" "$stage/CLI/"
+cp "$root/mcp/dipstick-mcp" "$stage/CLI/dipstick-mcp"
 cp "$root/README.md" "$root/README_KOR.md" "$stage/"
 cat > "$stage/CLI/INSTALL.txt" <<'TXT'
 1. Drag Dipstick.app into Applications.

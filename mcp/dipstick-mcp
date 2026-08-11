@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""dipstick-mcp — the gauge, readable by any agent.
+
+An MCP stdio server wrapping `dipstick --json`. Three tools, all read-only:
+what's left, whether a job of a given length is safe to start, and which
+subscription an anonymous launch would ride. It answers questions; it never
+launches, never changes settings, and never returns a command line -- an agent
+that wants to act on the answer must do so through whatever launcher its
+operator already trusts.
+
+The tool descriptions carry the reading discipline, because the numbers alone
+mislead: a raw percentage without its pace, a low reading minutes from reset,
+a reserved pool that is deliberately off limits. Agents quoting this server
+inherit those rules instead of re-deriving them wrong.
+
+Protocol: MCP over stdio (JSON-RPC 2.0, one message per line).
+Zero dependencies. Python 3.9+.
+
+Register with Claude Code:
+    claude mcp add dipstick -- dipstick-mcp
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+PROTOCOL_VERSION = "2024-11-05"
+SERVER_INFO = {"name": "dipstick", "version": "1.0.0"}
+
+DISCIPLINE = (
+    "Reading rules: judge by `surplus` (percentage points ahead of an even-spend "
+    "pace), not by `remaining` alone — 40% just before a reset is plenty, 94% just "
+    "after one is merely on pace. Windows with `imminent: true` reset within the "
+    "hour and must not drive a verdict. `binds: true` marks the window that "
+    "actually constrains new work. `state: STALE` means the reading predates "
+    "recent use and may be a whole reset old — say so rather than quoting it as "
+    "current. A subscription under its reserve floor is deliberately held back "
+    "for its owner's own use; do not treat it as available."
+)
+
+TOOLS = [
+    {
+        "name": "quota_status",
+        "description": (
+            "Current standing of every AI coding subscription this machine can "
+            "read (Claude Code, Codex, Antigravity): per-window remaining %, pace "
+            "surplus, verdict, reset time, and reserve state. Costs no quota — "
+            "every source is a local file or a metering endpoint. " + DISCIPLINE
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vendor": {
+                    "type": "string",
+                    "enum": ["claude", "codex", "agy"],
+                    "description": "Limit to one vendor's subscriptions.",
+                }
+            },
+        },
+    },
+    {
+        "name": "can_i_start",
+        "description": (
+            "Should a job of the given length start now? Answers GO, WAIT (with "
+            "the recovery time), or NO_DATA per subscription — never a downgrade "
+            "suggestion: if the pool is short, the answer is when it recovers, "
+            "not which lesser model to use instead. " + DISCIPLINE
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "minutes": {
+                    "type": "number",
+                    "description": "Expected job length in minutes.",
+                },
+                "vendor": {
+                    "type": "string",
+                    "enum": ["claude", "codex", "agy"],
+                    "description": "Only consider this vendor's subscriptions.",
+                },
+            },
+            "required": ["minutes"],
+        },
+    },
+    {
+        "name": "which_subscription",
+        "description": (
+            "Which subscription an anonymous launch would ride right now, per the "
+            "operator's configured mode (weighted pace pick, or pinned). Returns "
+            "the subscription name, account and reason only — no command line; "
+            "launching is the operator's tooling, not this gauge. " + DISCIPLINE
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
+VENDOR_PREFIX = {"claude": "Claude", "codex": "Codex", "agy": "Antigravity"}
+
+
+def snapshot():
+    exe = os.environ.get("DIPSTICK_BIN") or os.path.expanduser("~/.local/bin/dipstick")
+    if not os.path.exists(exe):
+        for cand in ("/opt/homebrew/bin/dipstick", "/usr/local/bin/dipstick"):
+            if os.path.exists(cand):
+                exe = cand
+                break
+        else:
+            raise RuntimeError(
+                "dipstick CLI not found (~/.local/bin or Homebrew). "
+                "Install it from https://github.com/blkpark/dipstick"
+            )
+    out = subprocess.run([exe, "--json"], capture_output=True, text=True, timeout=120)
+    if out.returncode != 0 or not out.stdout.strip():
+        raise RuntimeError(f"dipstick --json exited {out.returncode}: {out.stderr.strip()[:200]}")
+    return json.loads(out.stdout)
+
+
+def subs_of(snap, vendor):
+    subs = snap.get("subscriptions", [])
+    if vendor:
+        want = VENDOR_PREFIX[vendor]
+        subs = [s for s in subs if s.get("sub", "").startswith(want)]
+    return subs
+
+
+def slim_window(w):
+    return {
+        "window": w.get("name"),
+        "model_scope": w.get("pool"),          # per-model cap when not null
+        "remaining_pct": w.get("remaining"),
+        "pace_surplus_pp": w.get("surplus"),
+        "state": w.get("state"),
+        "why": w.get("why"),
+        "resets_at": w.get("resetsAt"),
+        "resets_in": w.get("resetsIn"),
+        "resets_within_hour": w.get("imminent"),
+        "binds": w.get("binds"),
+    }
+
+
+def tool_quota_status(args):
+    snap = snapshot()
+    return {
+        "taken_at": snap.get("takenAt"),
+        "main": snap.get("main"),
+        "mode": snap.get("mainMode"),
+        "subscriptions": [
+            {
+                "subscription": s.get("sub"),
+                "account": s.get("account"),
+                "is_main": s.get("isMain"),
+                "reserve": s.get("reserve"),
+                "note": s.get("note") or None,
+                "windows": [slim_window(w) for w in s.get("windows", [])],
+            }
+            for s in subs_of(snap, args.get("vendor"))
+        ],
+    }
+
+
+def tool_can_i_start(args):
+    minutes = float(args["minutes"])
+    snap = snapshot()
+    verdicts = []
+    for s in subs_of(snap, args.get("vendor")):
+        wins = s.get("windows", [])
+        if not wins:
+            verdicts.append({
+                "subscription": s.get("sub"),
+                "verdict": "NO_DATA",
+                "detail": s.get("note") or "no reading",
+            })
+            continue
+        if all(w.get("state") == "STALE" for w in wins):
+            verdicts.append({
+                "subscription": s.get("sub"),
+                "verdict": "NO_DATA",
+                "detail": ("every reading is stale — the numbers predate recent use "
+                           "and may be a reset old; refresh before deciding "
+                           f"({s.get('note')})"),
+            })
+            continue
+        # The binding window decides; imminent windows sit out, since whatever
+        # they lack returns within the hour — inside any real job's span.
+        candidates = [w for w in wins if not w.get("imminent")] or wins
+        bind = next((w for w in candidates if w.get("binds")), None) \
+            or min(candidates, key=lambda w: w.get("remaining", 100))
+        reserve = s.get("reserve") or {}
+        blocked = reserve.get("state") == "BLOCKED"
+        state = bind.get("state")
+        if blocked:
+            verdict, detail = "WAIT", (
+                f"held under its reserve floor — kept for the operator's own use "
+                f"({reserve.get('text', '')})")
+        elif state in ("GO", "TIGHT"):
+            verdict = "GO"
+            detail = (f"{bind.get('name')}: {bind.get('remaining'):.0f}% left, "
+                      f"pace {bind.get('surplus'):+.0f}pp — {bind.get('why')}")
+            if state == "TIGHT" and minutes > 120:
+                detail += (" — TIGHT plus a long job: fine to start, but a second "
+                           "long job on top may not be")
+        else:  # LOW / BLOCKED
+            verdict = "WAIT"
+            detail = (f"{bind.get('name')} at {bind.get('remaining'):.0f}% "
+                      f"(pace {bind.get('surplus'):+.0f}pp); recovers {bind.get('resetsIn')}. "
+                      "Waiting is the answer — not a smaller model.")
+        verdicts.append({
+            "subscription": s.get("sub"),
+            "verdict": verdict,
+            "detail": detail,
+            "binding_window": slim_window(bind),
+            "recovers_at": bind.get("resetsAt"),
+        })
+    return {"job_minutes": minutes, "taken_at": snap.get("takenAt"), "verdicts": verdicts}
+
+
+def tool_which_subscription(_args):
+    snap = snapshot()
+    name = snap.get("nextLaunch")
+    sub = next((s for s in snap.get("subscriptions", []) if s.get("sub") == name), {})
+    return {
+        "subscription": name,
+        "account": sub.get("account"),
+        "mode": snap.get("mainMode"),
+        "reason": snap.get("nextLaunchWhy"),
+        "note": ("This names the pool an anonymous launch would ride. It is not a "
+                 "command — launch through your own tooling."),
+    }
+
+
+HANDLERS = {
+    "quota_status": tool_quota_status,
+    "can_i_start": tool_can_i_start,
+    "which_subscription": tool_which_subscription,
+}
+
+
+def reply(msg_id, result=None, error=None):
+    out = {"jsonrpc": "2.0", "id": msg_id}
+    if error is not None:
+        out["error"] = error
+    else:
+        out["result"] = result
+    sys.stdout.write(json.dumps(out) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        method = msg.get("method")
+        msg_id = msg.get("id")
+        if method == "initialize":
+            reply(msg_id, {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": SERVER_INFO,
+            })
+        elif method == "notifications/initialized":
+            continue
+        elif method == "tools/list":
+            reply(msg_id, {"tools": TOOLS})
+        elif method == "tools/call":
+            params = msg.get("params") or {}
+            name = params.get("name")
+            handler = HANDLERS.get(name)
+            if handler is None:
+                reply(msg_id, error={"code": -32602, "message": f"unknown tool: {name}"})
+                continue
+            try:
+                result = handler(params.get("arguments") or {})
+                reply(msg_id, {"content": [
+                    {"type": "text", "text": json.dumps(result, ensure_ascii=False, indent=1)}
+                ]})
+            except Exception as e:
+                reply(msg_id, {"content": [
+                    {"type": "text", "text": f"error: {e}"}], "isError": True})
+        elif msg_id is not None:
+            reply(msg_id, error={"code": -32601, "message": f"unknown method: {method}"})
+
+
+if __name__ == "__main__":
+    main()
