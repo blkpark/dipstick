@@ -79,6 +79,15 @@ TOOLS = [
                     "enum": ["claude", "codex", "agy"],
                     "description": "Only consider this vendor's subscriptions.",
                 },
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Judge only windows scoped to this model (substring match "
+                        "on the window's model scope, e.g. 'Fable', 'Gemini') plus "
+                        "the account-wide windows it also drains. Choose the model "
+                        "by task nature BEFORE asking — this gauge answers whether "
+                        "that choice can run now, never which model to pick instead."),
+                },
             },
             "required": ["minutes"],
         },
@@ -181,6 +190,14 @@ def tool_can_i_start(args):
                            f"({s.get('note')})"),
             })
             continue
+        # A model scope narrows judgement to that model's own windows plus the
+        # account-wide ones it also drains -- both can stop the job. The model
+        # itself was chosen by task nature before asking; this only answers
+        # whether that choice can run now.
+        want = (args.get("model") or "").lower()
+        if want:
+            wins = [w for w in wins
+                    if not w.get("pool") or want in str(w.get("pool")).lower()] or wins
         # The binding window decides; imminent windows sit out, since whatever
         # they lack returns within the hour — inside any real job's span.
         candidates = [w for w in wins if not w.get("imminent")] or wins
