@@ -50,6 +50,7 @@ import urllib.request
 CODEX_HOME_GLOBS = [
     "~/Library/Application Support/orca/codex-accounts/*/home",
     "~/.codex",
+    "~/.codex-profiles/*/home",   # lane-dedicated homes (config-pinned launches)
 ]
 CONFIG_PATH = os.path.expanduser("~/.config/dipstick/config.json")
 GOOGLE_ACCOUNTS = os.path.expanduser("~/.gemini/google_accounts.json")
@@ -1163,6 +1164,11 @@ MAIN_BONUS = 10.0    # %p of stickiness: the main keeps the launch unless clearl
 
 
 def launch_prefix(sub):
+    if sub.startswith("Antigravity"):
+        # One account, no home juggling -- the prefix is just the CLI. `command`
+        # for the same reason as the others: survive an eval inside a shell
+        # function that shadows `agy`.
+        return "command agy --dangerously-skip-permissions", ""
     if sub.startswith("Claude"):
         # `command` for the same reason as codex below: the prefix must survive
         # being eval'd inside a shell function that shadows `claude`.
@@ -1185,7 +1191,7 @@ def sub_score(group):
     return (min(rem) - 70.0) if rem else None    # no reset clock: rough proxy
 
 
-VENDOR_PREFIX = {"codex": "Codex", "claude": "Claude"}
+VENDOR_PREFIX = {"codex": "Codex", "claude": "Claude", "agy": "Antigravity"}
 
 
 def pick_launch(db, rows, vendor=None):
@@ -1223,8 +1229,11 @@ def pick_launch(db, rows, vendor=None):
 
     best, best_score = None, None
     for sub, _, group in group_by_subscription(rows, main):
-        if sub.startswith("Antigravity"):
-            continue                               # role-fixed, never a launch target
+        if sub.startswith("Antigravity") and prefix != "Antigravity":
+            # Out of the anonymous pick -- agy is role-fixed (research), so
+            # @main never rides it. Asking for it by name (--vendor agy) is the
+            # role doing exactly what it is fixed to do, and must resolve.
+            continue
         if prefix and not sub.startswith(prefix):
             continue                               # the typed command fixes the vendor
         if reserve_floor(sub) is not None and sub != main and not prefix:
