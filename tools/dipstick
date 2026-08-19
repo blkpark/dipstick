@@ -33,6 +33,7 @@ import base64
 import collections
 import datetime
 import glob
+import hashlib
 import html as htmllib
 import json
 import os
@@ -59,6 +60,14 @@ GOOGLE_ACCOUNTS = os.path.expanduser("~/.gemini/google_accounts.json")
 # logged out (present, with an empty accessToken) while the wrapper's copy is the
 # live one. Both are tried, in order, and the first usable token wins.
 CLAUDE_KEYCHAINS = ["Claude Code-credentials", "Orca Claude Code Managed Credentials"]
+# A second Claude subscription is run by pointing CLAUDE_CONFIG_DIR at another
+# directory; the CLI then keeps that login in its own keychain entry, suffixed
+# with the first eight hex of sha256(absolute config dir). Sibling `~/.claude-*`
+# directories are picked up automatically, and `claude_homes` in the config file
+# names any that live elsewhere.
+CLAUDE_HOME_GLOBS = ["~/.claude-*"]
+CLAUDE_HOMES = []            # extra config dirs from the config file
+CLAUDE_HOME_BY_SUB = {}      # label -> config dir, for non-default installs
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # Refreshing the access token is the only way this reading survives: the token
 # lasts hours, and without a refresh the gauge goes dark until something else
@@ -92,11 +101,12 @@ IMMINENT_MIN = 60.0
 
 def load_config():
     """User config overrides the empty defaults above. Absent file is fine."""
-    global RESERVE, POLICY, IMMINENT_MIN
+    global RESERVE, POLICY, IMMINENT_MIN, CLAUDE_HOMES
     try:
         cfg = json.load(open(CONFIG_PATH))
     except (OSError, ValueError):
         return
+    CLAUDE_HOMES = list(cfg.get("claude_homes") or [])
     RESERVE = {k: float(v) for k, v in (cfg.get("reserve") or {}).items()}
     POLICY = {k: (v[0], v[1]) for k, v in (cfg.get("policy") or {}).items()
               if isinstance(v, (list, tuple)) and len(v) == 2}
@@ -829,21 +839,51 @@ def codex_rows(db, live_total):
     return rows
 
 
-def claude_account(db=None):
+def claude_keychain_service(config_dir):
+    """The keychain entry Claude Code uses for a given CLAUDE_CONFIG_DIR."""
+    digest = hashlib.sha256(os.path.abspath(config_dir).encode()).hexdigest()[:8]
+    return "Claude Code-credentials-" + digest
+
+
+def claude_installs():
+    """[(config_dir, [keychain services to try])], default install first.
+
+    The default install is the one with the wrapper fallbacks: its plain entry is
+    often a logged-out stub while a multi-account wrapper holds the live token.
+    """
+    default = os.path.expanduser("~/.claude")
+    out = [(default, CLAUDE_KEYCHAINS + [claude_keychain_service(default)])]
+    extra = list(CLAUDE_HOMES)
+    for pattern in CLAUDE_HOME_GLOBS:
+        extra += glob.glob(os.path.expanduser(pattern))
+    for d in extra:
+        d = os.path.expanduser(d).rstrip("/")
+        if os.path.isdir(d) and d != default and d not in [x for x, _ in out]:
+            out.append((d, [claude_keychain_service(d)]))
+    return out
+
+
+def claude_account(db=None, config_dir=None):
     """Best-known account email. `claude auth status` answers from the default
     keychain entry, which can be a logged-out stub while a wrapper's entry keeps
     the session alive -- so the last email that ever resolved is remembered and
     used when the live lookup comes back empty."""
     email = ""
-    # ~/.claude.json keeps the account block even while the default keychain
-    # entry is logged out, and reading it is free; `claude auth status` spawns
-    # the CLI and answers only for the default entry.
-    try:
-        doc = json.load(open(os.path.expanduser("~/.claude.json")))
+    # The `.claude.json` beside a config dir keeps the account block even while
+    # the keychain entry is logged out, and reading it is free; `claude auth
+    # status` spawns the CLI and answers only for the default entry.
+    default = os.path.expanduser("~/.claude")
+    config_dir = config_dir or default
+    for path in (config_dir.rstrip("/") + ".json",
+                 os.path.join(config_dir, ".claude.json")):
+        try:
+            doc = json.load(open(path))
+        except Exception:
+            continue
         email = (doc.get("oauthAccount") or {}).get("emailAddress") or ""
-    except Exception:
-        pass
-    if not email:
+        if email:
+            break
+    if not email and config_dir == default:
         try:
             out = subprocess.run(["claude", "auth", "status", "--json"],
                                  capture_output=True, text=True, timeout=25).stdout
@@ -851,15 +891,16 @@ def claude_account(db=None):
         except Exception:
             pass
     if db is not None:
+        key = "claude_email" if config_dir == default else "claude_email:" + config_dir
         if email:
-            set_setting(db, "claude_email", email)
+            set_setting(db, key, email)
         else:
-            email = get_setting(db, "claude_email", "")
+            email = get_setting(db, key, "")
     return email or "계정 미상"
 
 
-def claude_credentials():
-    """(oauth, note). First usable credential across the known keychain entries.
+def claude_credentials(services=None):
+    """(oauth, note). First usable credential across the given keychain entries.
 
     An entry can exist and still be logged out: the CLI leaves the record behind
     with an empty accessToken and expiresAt of 0. Reading that as "expired" sent
@@ -868,7 +909,7 @@ def claude_credentials():
     since the default entry is often the logged-out one.
     """
     found_any = False
-    for service in CLAUDE_KEYCHAINS:
+    for service in (services or CLAUDE_KEYCHAINS):
         account, raw = _keychain_read(service)
         if raw is False:
             return None, L("keychain 읽기 실패 (접근 승인 필요)",
@@ -971,10 +1012,45 @@ def claude_refresh(cred):
 
 
 def claude_rows(db):
-    base = {"account": claude_account(db), "sub": "Claude", "pool": None, "windows": []}
-    cred, err = claude_credentials()
+    """One row per Claude install — the default one, plus any second subscription
+    run under its own CLAUDE_CONFIG_DIR. An install that is merely absent stays
+    silent; only the default one reports why it could not be read, so a machine
+    with one account looks exactly as it did before."""
+    rows, seen = [], set()
+    default = os.path.expanduser("~/.claude")
+    for config_dir, services in claude_installs():
+        for row in claude_install_rows(db, config_dir, services,
+                                       quiet=config_dir != default):
+            if row["account"] in seen and not row["windows"]:
+                continue          # same login read twice; keep the one with data
+            seen.add(row["account"])
+            rows.append(row)
+    # Two Max plans carry the same label, and an ambiguous label breaks both the
+    # card list and --set-main, so a duplicate takes the account's name to tell
+    # them apart. Done only when there is a clash: a single account keeps the
+    # plain "Claude Max" it has always shown.
+    CLAUDE_HOME_BY_SUB.clear()
+    labels = [r["sub"] for r in rows]
+    for row in rows:
+        if labels.count(row["sub"]) > 1:
+            row["sub"] += " · " + row["account"].split("@")[0]
+        if row.get("claude_home") and row["claude_home"] != default:
+            CLAUDE_HOME_BY_SUB[row["sub"]] = row["claude_home"]
+    return rows
+
+
+def claude_install_rows(db, config_dir, services, quiet=False):
+    base = {"account": claude_account(db, config_dir), "sub": "Claude",
+            "pool": None, "windows": [], "claude_home": config_dir}
+    # Each install caches its own usage response: one key for all of them would
+    # have the second subscription reading the first one's numbers. The default
+    # install keeps the original key so an upgrade does not drop its cache.
+    cache_key = "claude_usage"
+    if config_dir != os.path.expanduser("~/.claude"):
+        cache_key += ":" + config_dir
+    cred, err = claude_credentials(services)
     if err:
-        return [dict(base, note=err)]
+        return [] if quiet else [dict(base, note=err)]
     oauth = cred["oauth"]
 
     base["sub"] = sub_label("Claude", oauth.get("subscriptionType"))
@@ -985,8 +1061,8 @@ def claude_rows(db):
         if oauth is None:
             return [dict(base, note=why)]
         note = why or L("토큰 갱신됨", "token refreshed")
-        cache_drop(db, "claude_usage")
-    body, age = cache_get(db, "claude_usage", CLAUDE_TTL)
+        cache_drop(db, cache_key)
+    body, age = cache_get(db, cache_key, CLAUDE_TTL)
     if body is None:
         req = urllib.request.Request(CLAUDE_USAGE_URL, headers={
             "Authorization": f"Bearer {oauth['accessToken']}",
@@ -995,7 +1071,7 @@ def claude_rows(db):
         try:
             with urllib.request.urlopen(req, timeout=25) as r:
                 body = json.load(r)
-            cache_put(db, "claude_usage", body)
+            cache_put(db, cache_key, body)
         except Exception as e:
             # A 401 on a token that looked live means it was revoked or rotated
             # early; the stored expiry is a hint, not the authority.
@@ -1006,7 +1082,7 @@ def claude_rows(db):
                     try:
                         with urllib.request.urlopen(req, timeout=25) as r:
                             body = json.load(r)
-                        cache_put(db, "claude_usage", body)
+                        cache_put(db, cache_key, body)
                         e = None
                         note = why or L("토큰 갱신됨", "token refreshed")
                     except Exception as again:
@@ -1014,7 +1090,7 @@ def claude_rows(db):
             if e is None:
                 pass
             else:
-                body, age = cache_get(db, "claude_usage")     # stale beats nothing
+                body, age = cache_get(db, cache_key)     # stale beats nothing
                 reason = (f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError)
                           else type(e).__name__)
                 if body is None:
@@ -1172,7 +1248,11 @@ def launch_prefix(sub):
     if sub.startswith("Claude"):
         # `command` for the same reason as codex below: the prefix must survive
         # being eval'd inside a shell function that shadows `claude`.
-        return "command claude --permission-mode bypassPermissions", ""
+        cmd = "command claude --permission-mode bypassPermissions"
+        # A second subscription lives under its own CLAUDE_CONFIG_DIR; without
+        # naming it the launch would quietly ride the default account instead.
+        home = CLAUDE_HOME_BY_SUB.get(sub)
+        return (f'env CLAUDE_CONFIG_DIR="{home}" {cmd}' if home else cmd), ""
     home = codex_home_for(sub.split()[-1].lower())
     if not home:
         return None, L(f"{sub}: codex 홈을 못 찾음", f"{sub}: no codex home found")

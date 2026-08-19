@@ -11,13 +11,12 @@ it somewhere different, and none of them tells you the thing you actually want t
 know before starting a long job: *is there enough left, and if not, when does it
 come back?* dipstick reads all three, in one place, in a menu bar.
 
-```
-Claude Max                         MAIN   you@example.com
-    5-hour window   76%   resets in 2h 47m
-    7-day window    28%   resets in 2h 29m   ◂ binds
-Codex Pro                                 you@example.com
-    7-day window    82%   resets in 4d 22h
-```
+<img src="assets/screenshot.png" width="620" alt="Menu bar showing three subscriptions, with the panel open below it">
+
+Three subscriptions across three accounts, read at once: two Codex plans and a
+Claude Max, each with its own login. The bar carries one figure apiece; the
+panel opens on click with every window, the pace surplus, the reserve floor and
+which pool the next launch would ride.
 
 **It never sends a prompt to a model.** Asking a model "how much do I have left"
 would open a fresh rate-limit window — the opposite of what a gauge should do. So
@@ -46,9 +45,45 @@ orchestrator — dipstick reads whatever is installed and skips the rest:
 | Codex CLI | `~/.codex` session rollouts | 〃 |
 | Antigravity | the running agent's local RPC | 〃 |
 
-Any one of the three is enough. Multi-account wrapper homes (Orca-style
-`codex-accounts/*/home`, or your own `~/.codex-profiles/*/home`) are
-auto-detected when present — a bonus, never a requirement.
+Any one of the three is enough.
+
+## Several accounts of the same tool
+
+Two subscriptions of the same vendor is the case dipstick is really for — one
+gauge, both pools, and a launch that rides whichever has room. Neither CLI has a
+profile switcher; both keep everything under a home directory named by an
+environment variable, so a second account is a second directory.
+
+**Codex** — `CODEX_HOME` holds the login, the config and the session rollouts:
+
+```sh
+mkdir -p ~/.codex-profiles/work/home
+CODEX_HOME=~/.codex-profiles/work/home codex login     # log in as the other account
+alias codex-work='CODEX_HOME=~/.codex-profiles/work/home codex'
+```
+
+**Claude Code** — `CLAUDE_CONFIG_DIR` does the same. The login does not live in
+the directory but in the login keychain, under an entry named for it
+(`Claude Code-credentials-<first 8 hex of sha256 of the absolute path>`), so
+each config dir gets its own session rather than overwriting the last:
+
+```sh
+CLAUDE_CONFIG_DIR=~/.claude-work claude          # first run asks you to log in
+alias claude-work='CLAUDE_CONFIG_DIR=~/.claude-work claude'
+```
+
+dipstick finds these on its own: `~/.codex`, `~/.codex-profiles/*/home` and
+Orca-style `codex-accounts/*/home` for Codex, `~/.claude` and any sibling
+`~/.claude-*` for Claude. A home kept somewhere else is named in the config
+file, and nothing else changes:
+
+```json
+{ "claude_homes": ["~/work/claude-config"] }
+```
+
+Each account then shows as its own card with its own account line, and
+`--main-cmd` names the home of whichever one it picked, so the launch rides that
+account rather than the default one.
 
 ## Install
 

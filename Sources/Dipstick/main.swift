@@ -274,6 +274,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         set { UserDefaults.standard.set(newValue, forKey: "alerts") }
     }
 
+    // `--snapshot <dir>`: render the status-bar image and the open panel to PNGs
+    // and exit. The app can rasterise its own views without any screen-recording
+    // or accessibility permission, which is exactly what a README screenshot
+    // needs -- real pixels, real data, no TCC dialog.
+    var snapshotDir: String? = {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--snapshot"), args.count > i + 1 else { return nil }
+        return args[i + 1]
+    }()
+
     func applicationDidFinishLaunching(_ note: Notification) {
         item.button?.target = self
         item.button?.action = #selector(togglePanel)
@@ -310,6 +320,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self.item.button?.alphaValue = 1
                 self.repaint()
+                if let dir = self.snapshotDir {
+                    if self.snapshot == nil { fputs("dipstick: no snapshot data\n", stderr); exit(1) }
+                    self.saveSnapshots(to: dir)
+                }
             }
         }
     }
@@ -361,6 +375,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Main first, then whatever is tightest: the readings most likely to stop
+    /// work. Every subscription with a reading gets a column — a fourth one
+    /// costs ~35pt, and the cap of three silently hid Claude, which is exactly
+    /// the pool whose floor matters most here.
+    func orderedSubs(_ snap: Snapshot) -> [Subscription] {
+        let bar = snap.barWindow
+        let withData = snap.subscriptions.filter { !$0.windows.isEmpty }
+        return withData.filter(\.isMain)
+            + withData.filter { !$0.isMain }
+                .sorted { (bindingWindow($0, prefer: bar)?.remaining ?? 101)
+                            < (bindingWindow($1, prefer: bar)?.remaining ?? 101) }
+    }
+
     private func updateTitle() {
         guard let button = item.button else { return }
         guard let snap = snapshot else {
@@ -371,16 +398,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 : "Could not read a snapshot"
             return
         }
-        // Main first, then whatever is tightest: the readings most likely to stop
-        // work. Every subscription with a reading gets a column — a fourth one
-        // costs ~35pt, and the cap of three silently hid Claude, which is exactly
-        // the pool whose floor matters most here.
         let bar = snap.barWindow
-        let withData = snap.subscriptions.filter { !$0.windows.isEmpty }
-        let ordered = withData.filter(\.isMain)
-            + withData.filter { !$0.isMain }
-                .sorted { (bindingWindow($0, prefer: bar)?.remaining ?? 101)
-                            < (bindingWindow($1, prefer: bar)?.remaining ?? 101) }
+        let ordered = orderedSubs(snap)
         button.title = ""
         button.image = renderStatus(ordered, pinned: snap.mainMode == "pinned",
                                     prefer: bar, appearance: button.effectiveAppearance)
@@ -425,6 +444,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return ok
     }
 
+}
+
+// MARK: - Snapshot rendering (`--snapshot <dir>`)
+
+extension AppDelegate {
+    /// Writes bar.png (the status-item image) and panel.png (the open panel) at
+    /// 2x, both under the dark appearance so the pair composites into one hero
+    /// image regardless of the machine's current theme.
+    func saveSnapshots(to dir: String) {
+        let dark = NSAppearance(named: .darkAqua)
+        guard let raw = snapshot else { exit(1) }
+        // A README screenshot is public: real account addresses are swapped for
+        // example ones before anything is rendered.
+        let stand = ["you@example.com", "work@example.com", "team@example.com"]
+        var seen: [String: String] = [:]
+        let snap = Snapshot(
+            takenAt: raw.takenAt, main: raw.main,
+            subscriptions: raw.subscriptions.map { s in
+                let masked = seen[s.account] ?? stand[min(seen.count, stand.count - 1)]
+                seen[s.account] = masked
+                return Subscription(sub: s.sub, key: s.key, account: masked,
+                                    isMain: s.isMain, selectable: s.selectable,
+                                    reserve: s.reserve, windows: s.windows, note: s.note)
+            },
+            runningCodex: raw.runningCodex, mainMode: raw.mainMode,
+            barWindow: raw.barWindow, nextLaunch: raw.nextLaunch, strings: raw.strings)
+        snapshot = snap
+        defer { snapshot = raw }
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+        let out = URL(fileURLWithPath: dir)
+
+        let barImage = renderStatus(orderedSubs(snap), pinned: snap.mainMode == "pinned",
+                                    prefer: snap.barWindow, appearance: dark)
+        writePNG(barImage, scale: 2, to: out.appendingPathComponent("bar.png"))
+
+        // The panel view renders offscreen inside a borderless window: SwiftUI
+        // needs a window to lay out, and the window supplies the 2x backing.
+        let hosting = makePanel()
+        let win = NSWindow(contentRect: NSRect(origin: NSPoint(x: -4000, y: -4000),
+                                               size: hosting.frame.size),
+                           styleMask: .borderless, backing: .buffered, defer: false)
+        win.appearance = dark
+        win.isOpaque = true
+        win.backgroundColor = .windowBackgroundColor
+        win.contentView = hosting
+        win.orderBack(nil)
+        hosting.layoutSubtreeIfNeeded()
+        // One runloop beat so SwiftUI finishes its first layout pass.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { exit(1) }
+            hosting.cacheDisplay(in: hosting.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: out.appendingPathComponent("panel.png"))
+            exit(0)
+        }
+    }
+
+    private func writePNG(_ image: NSImage, scale: CGFloat, to url: URL) {
+        let w = Int(image.size.width * scale), h = Int(image.size.height * scale)
+        guard w > 0, h > 0, let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return }
+        rep.size = image.size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        image.draw(in: NSRect(origin: .zero, size: image.size))
+        NSGraphicsContext.restoreGraphicsState()
+        try? rep.representation(using: .png, properties: [:])?.write(to: url)
+    }
 }
 
 // MARK: - Popover
