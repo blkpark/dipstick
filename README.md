@@ -17,6 +17,13 @@ subscription runs dry while another idles. dipstick reads all three vendors in
 one place and keeps a standing answer: `$(dipstick --main-cmd)` in front of any
 command launches it on whichever account the numbers say should take it.
 
+How that account is chosen is the actual product. **weighted** spends by *pace* —
+not the raw percentage, but how far each pool sits ahead of an even burn toward
+its reset, so a 40% the day before a reset outranks a 94% the hour after one.
+**pinned** ignores the math and concentrates every launch on one subscription
+until you say otherwise. Details in
+[Pace, and how the launch target is chosen](#pace-and-how-the-launch-target-is-chosen).
+
 <img src="assets/screenshot.png" width="620" alt="Menu bar showing three subscriptions, with the panel open below it">
 
 Three subscriptions across three accounts, read at once: two Codex plans and a
