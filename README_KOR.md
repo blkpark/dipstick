@@ -26,6 +26,20 @@ Codex Pro                                 you@example.com
 
 Codex rollout 파일은 몇 GB까지 커질 수 있으므로, 파싱 결과는 inode 기준으로 캐시합니다. 첫 실행 이후에는 새로고침이 약 1초 정도 걸립니다.
 
+## 필요한 것
+
+macOS 13+ 와 Python 3.9+(시스템 기본이면 충분). 패키지·데몬·오케스트레이터 전부 불필요 —
+dipstick 은 설치돼 있는 것만 읽고 없는 것은 건너뜁니다:
+
+| 쓰는 것 | dipstick 이 읽는 곳 | 없으면 |
+|---|---|---|
+| Claude Code | OAuth 사용량 엔드포인트(로그인 키체인) | 카드가 안 뜰 뿐 |
+| Codex CLI | `~/.codex` 세션 롤아웃 | 〃 |
+| Antigravity | 실행 중인 에이전트의 로컬 RPC | 〃 |
+
+셋 중 하나만 있어도 됩니다. 다계정 래퍼 홈(Orca 식 `codex-accounts/*/home`, 또는 직접 만든
+`~/.codex-profiles/*/home`)은 있으면 자동 감지 — 보너스일 뿐 요구사항이 아닙니다.
+
 ## 설치
 
 macOS 13 이상과 Python 3.9 이상이 필요합니다. 시스템 Python이면 충분합니다. 별도 패키지는 없습니다.

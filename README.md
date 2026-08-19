@@ -35,9 +35,22 @@ quota.
 Codex rollouts can run to several GB, so parses are cached by inode; after the
 first run a refresh takes about a second.
 
-## Install
+## What you need
 
-Requires macOS 13+ and Python 3.9+ (the system one is fine). No packages.
+macOS 13+ and Python 3.9+ (the system one is fine). No packages, no daemon, no
+orchestrator — dipstick reads whatever is installed and skips the rest:
+
+| You use | dipstick reads | If absent |
+|---|---|---|
+| Claude Code | its OAuth usage endpoint (login keychain) | card simply not shown |
+| Codex CLI | `~/.codex` session rollouts | 〃 |
+| Antigravity | the running agent's local RPC | 〃 |
+
+Any one of the three is enough. Multi-account wrapper homes (Orca-style
+`codex-accounts/*/home`, or your own `~/.codex-profiles/*/home`) are
+auto-detected when present — a bonus, never a requirement.
+
+## Install
 
 ```sh
 git clone https://github.com/blkpark/dipstick.git && cd dipstick
