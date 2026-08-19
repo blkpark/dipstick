@@ -85,6 +85,21 @@ Each account then shows as its own card with its own account line, and
 `--main-cmd` names the home of whichever one it picked, so the launch rides that
 account rather than the default one.
 
+### With Orca (or any multi-account wrapper)
+
+dipstick needs no orchestrator — but if you already run one, the two compose
+cleanly because they hold opposite ends of the job: the wrapper owns *launching*
+into many accounts, dipstick owns *metering* them.
+
+Orca is the case it was built alongside. Orca keeps each
+Codex account under its own home (`codex-accounts/*/home`) and its Claude login
+in a managed keychain entry — dipstick reads both automatically, so every
+account Orca can launch into shows up as a card with no configuration. In the
+other direction, `$(dipstick --main-cmd)` drops into any command Orca (or a
+plain shell) runs, so the wrapper launches into whichever account the gauge says
+has room. Same shape for any other wrapper: point `claude_homes` or a
+`~/.codex-profiles/*/home` symlink at wherever it keeps its accounts.
+
 ## Install
 
 ```sh
