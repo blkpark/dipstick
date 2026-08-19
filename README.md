@@ -24,6 +24,10 @@ its reset, so a 40% the day before a reset outranks a 94% the hour after one.
 until you say otherwise. Details in
 [Pace, and how the launch target is chosen](#pace-and-how-the-launch-target-is-chosen).
 
+**It runs on its own.** No orchestrator, no daemon, no packages — Orca and
+friends are optional, and dipstick composes with them if you already run one
+([With Orca](#with-orca-or-any-multi-account-wrapper)).
+
 <img src="assets/screenshot.png" width="620" alt="Menu bar showing three subscriptions, with the panel open below it">
 
 Three subscriptions across three accounts, read at once: two Codex plans and a
