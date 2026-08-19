@@ -4,12 +4,18 @@
 
 *[한국어 README](README_KOR.md)*
 
-How much is left on your AI coding subscriptions, and which one you're using right now.
+Which account should the next job burn? dipstick reads every AI coding
+subscription on the machine and answers that — in a menu bar, on the command
+line, and to your agents over MCP.
 
 Claude Code, Codex and Antigravity each meter you on rolling windows, each shows
-it somewhere different, and none of them tells you the thing you actually want to
-know before starting a long job: *is there enough left, and if not, when does it
-come back?* dipstick reads all three, in one place, in a menu bar.
+it somewhere different, and none of them answers the two questions that matter
+before a long job: *which one has room, and if none does, when does it come
+back?* Run more than one account and the second question turns into the first —
+somebody has to pick the pool every launch rides, and doing it by feel means one
+subscription runs dry while another idles. dipstick reads all three vendors in
+one place and keeps a standing answer: `$(dipstick --main-cmd)` in front of any
+command launches it on whichever account the numbers say should take it.
 
 <img src="assets/screenshot.png" width="620" alt="Menu bar showing three subscriptions, with the panel open below it">
 
