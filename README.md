@@ -207,6 +207,39 @@ discipline, so an agent quoting them inherits the pace/imminent/stale rules
 instead of re-deriving them wrong. Launching stays with whatever tooling you
 already trust; the server has no tool that acts.
 
+## Model and effort
+
+dipstick has no opinion about which model a job deserves, or how deep its
+reasoning should run. That belongs to whatever decides *what the job is* — a
+rubric, a skill, your own judgement — and it is settled before the gauge is
+consulted. The gauge answers one question about that decision: can it run right
+now?
+
+Keeping the two apart matters, because when a pool is short they start to look
+like the same question and are not. "This job needs the deep model" is a
+statement about the task. "That pool has 4% left" is a statement about the
+calendar. Let the second rewrite the first and a job that needed the big model
+quietly ships on the small one, with nothing in the log saying so. That is why
+`can_i_start` answers GO, or WAIT with the recovery time, and never "use the
+smaller model instead".
+
+Where the gauge does know about models is capacity. A plan can carry a per-model
+cap alongside its shared window — a Claude Max meters Fable separately, agy pools
+by model family — so the model you picked can be blocked while the account as a
+whole is fine, or the reverse. `can_i_start(minutes, model: "...")` narrows the
+verdict to that model's own windows plus the shared ones it also drains, and the
+panel gives each cap its own row.
+
+The order that keeps them straight:
+
+1. Pick the model and effort from the task — scope, blast radius, novelty.
+2. Ask the gauge whether that pick can run now.
+3. GO, launch. WAIT, wait or take another task. Never downgrade to fit.
+
+Effort never reaches dipstick at all. It changes how much a run spends, so it
+surfaces afterwards as a bigger number in the token history — the setting itself
+is not something the gauge can see.
+
 ## Tokens
 
 The dashboard also shows what this machine actually spent, read from the same
