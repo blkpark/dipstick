@@ -74,6 +74,11 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # renews it. The client id is the public one Claude Code's own OAuth flow uses.
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+ZCODE_LEVELDB = os.path.expanduser(
+    "~/Library/Application Support/ZCode/session/Local Storage/leveldb")
+ZCODE_CYCLE = {"daily": 1440, "weekly": 10080, "monthly": 43200}
+ZCODE_CLI = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
+
 AGY_RPC = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
 DB_PATH = os.path.expanduser(os.environ.get("DIPSTICK_DB",
                              "~/.local/share/dipstick/dipstick.db"))
@@ -1190,6 +1195,94 @@ def agy_rows():
     return rows
 
 
+def _zcode_snapshots():
+    """Newest entitlement snapshot per provider, read out of ZCode's leveldb.
+
+    ZCode is a GUI with no local RPC, but it caches the server's own
+    entitlement reply verbatim in Local Storage -- so a reading is a passive
+    file read that costs no quota, the same contract as the Codex rollouts.
+    The records sit in leveldb's uncompressed write-ahead log; once leveldb
+    compacts them into a .ldb they are snappy-framed and this scan stops
+    seeing them. That is why the age is reported rather than assumed: an
+    unreadable store looks the same as an app that has not run.
+
+    Latin-1 keeps byte offsets one-to-one with the file, so raw_decode can
+    pick each JSON value out of the surrounding leveldb framing.
+    """
+    best = {}
+    try:
+        names = [f for f in os.listdir(ZCODE_LEVELDB) if f.endswith(".log")]
+    except OSError:
+        return best
+    dec = json.JSONDecoder()
+    for name in names:
+        try:
+            with open(os.path.join(ZCODE_LEVELDB, name), "rb") as fh:
+                text = fh.read().decode("latin-1")
+        except OSError:
+            continue
+        for m in re.finditer(r'\{"cachedAt":', text):
+            try:
+                obj, _ = dec.raw_decode(text, m.start())
+            except ValueError:
+                continue
+            snap = obj.get("snapshot") or {}
+            pid = (snap.get("provider") or {}).get("id")
+            cached = obj.get("cachedAt") or 0
+            if pid and cached >= best.get(pid, (None, 0))[1]:
+                best[pid] = (snap, cached)
+    return best
+
+
+def zcode_rows():
+    """One row per model cap the plan carries -- that is how ZCode meters."""
+    rows = []
+    now = datetime.datetime.now()
+    for snap, cached in sorted(_zcode_snapshots().values(), key=lambda s: -s[1]):
+        quota = snap.get("quota") or {}
+        limits = quota.get("limits") or []
+        sub = "ZCode " + str(quota.get("level") or "").strip() if quota.get("level") else "ZCode"
+        subscription = snap.get("subscription") or {}
+        account = subscription.get("identityMasked") or L("계정 미상", "account unknown")
+        cycles = {d.get("productId"): d.get("billingCycle")
+                  for d in (subscription.get("details") or [])}
+        if not limits:
+            why = snap.get("unavailableReason")
+            if why == "no_plan" or not snap.get("authenticated"):
+                continue          # a provider the account holds no plan on
+            rows.append({"sub": sub, "account": account, "pool": None, "windows": [],
+                         "note": L("잔량 값이 비어 있음", "no quota in the cached reading")})
+            continue
+        stale = max(0.0, (now.timestamp() - cached / 1000.0) / 3600)
+        seen = datetime.datetime.fromtimestamp(cached / 1000.0)
+        note = L("관측 %s (%.0fh 전)" % (seen.strftime("%m-%d %H:%M"), stale),
+                 "seen %s (%.0fh ago)" % (seen.strftime("%m-%d %H:%M"), stale))
+        for lim in limits:
+            unit = lim.get("unit") or lim.get("number") or 0
+            left = lim.get("remaining")
+            if left is None or not unit:
+                continue
+            remaining = max(0.0, min(100.0, float(left) / float(unit) * 100))
+            reset_ms = lim.get("nextResetTime")
+            resets = datetime.datetime.fromtimestamp(reset_ms / 1000.0) if reset_ms else None
+            minutes = ZCODE_CYCLE.get(cycles.get(lim.get("planId")))
+            sur = pace_surplus(remaining, minutes, resets)
+            model = next((d.get("displayName") or d.get("modelCode")
+                          for d in (lim.get("usageDetails") or []) if d.get("displayName")
+                          or d.get("modelCode")), None)
+            rows.append({
+                "sub": sub, "account": account, "pool": model,
+                "windows": [{"name": window_label(minutes) if minutes
+                             else L("한도", "allowance"),
+                             "remaining": remaining, "minutes": minutes, "resets": resets,
+                             "surplus": sur,
+                             "verdict": verdict(remaining,
+                                                hours_until(resets) if resets else 0,
+                                                stale, 0, is_imminent(resets), sur)}],
+                "note": note})
+    return rows
+
+
 def live_codex():
     counts = collections.Counter()
     try:
@@ -1206,7 +1299,8 @@ def live_codex():
 
 def collect(db):
     consumers = live_codex()
-    rows = codex_rows(db, sum(consumers.values())) + claude_rows(db) + agy_rows()
+    rows = (codex_rows(db, sum(consumers.values())) + claude_rows(db)
+            + agy_rows() + zcode_rows())
     record_samples(db, rows)
     try:
         ingest_tokens(db)
@@ -1240,6 +1334,11 @@ MAIN_BONUS = 10.0    # %p of stickiness: the main keeps the launch unless clearl
 
 
 def launch_prefix(sub):
+    if sub.startswith("ZCode"):
+        # The GUI ships its own headless CLI; the app bundle is the only place
+        # it exists, so the prefix names it by path rather than assuming a
+        # `zcode` on PATH.
+        return ("node " + ZCODE_CLI + " --mode build"), ""
     if sub.startswith("Antigravity"):
         # One account, no home juggling -- the prefix is just the CLI. `command`
         # for the same reason as the others: survive an eval inside a shell
@@ -1271,7 +1370,8 @@ def sub_score(group):
     return (min(rem) - 70.0) if rem else None    # no reset clock: rough proxy
 
 
-VENDOR_PREFIX = {"codex": "Codex", "claude": "Claude", "agy": "Antigravity"}
+VENDOR_PREFIX = {"codex": "Codex", "claude": "Claude", "agy": "Antigravity",
+                 "zcode": "ZCode"}
 
 
 def pick_launch(db, rows, vendor=None):
@@ -1313,6 +1413,12 @@ def pick_launch(db, rows, vendor=None):
             # Out of the anonymous pick -- agy is role-fixed (research), so
             # @main never rides it. Asking for it by name (--vendor agy) is the
             # role doing exactly what it is fixed to do, and must resolve.
+            continue
+        if sub.startswith("ZCode") and prefix != "ZCode":
+            # Same reasoning, different cause: an anonymous pick answers "run
+            # this somewhere", and swapping in a different vendor's model mid
+            # dispatch is a substitution, not a spend decision. ZCode answers
+            # only when asked for by name.
             continue
         if prefix and not sub.startswith(prefix):
             continue                               # the typed command fixes the vendor
