@@ -39,6 +39,7 @@ import json
 import os
 import re
 import sqlite3
+import shutil
 import subprocess
 import sys
 import time
@@ -733,6 +734,15 @@ def codex_home_for(plan):
     return None
 
 
+CODEX_RPC_TTL = 300              # app-server answer is cached this long per account
+CODEX_RPC_TIMEOUT = 25           # seconds to wait for one app-server reply
+CODEX_BIN_CANDIDATES = [
+    "~/.local/bin/codex",
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+    "~/.codex/packages/standalone/current/bin/codex",
+]
+
 SCAN_CHUNK = 8 * 1024 * 1024     # backwards-scan step
 RESCAN_BYTES = 64 * 1024 * 1024  # how deep a changed, already-known file is rescanned
 
@@ -779,7 +789,141 @@ def _extract_rate_limits(path, max_bytes=None):
     return None, None, None
 
 
+def codex_bin():
+    for cand in CODEX_BIN_CANDIDATES:
+        p = os.path.expanduser(cand)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return os.path.realpath(p)
+    return None
+
+
+def _codex_rpc_read(home, exe):
+    """Ask this account's own app-server for its rate limits. No model call.
+
+    `codex app-server` is the process the TUI talks to; `account/rateLimits/read`
+    is the method behind its status line. It answers from the account, so the
+    reading is current even when nothing has run on that home for days -- the
+    rollout scan below cannot say anything about an idle account, and an idle
+    account is exactly the one whose figure a launch decision needs.
+
+    Only the read method is ever sent. The same server exposes a reset-credit
+    consumer next to it; that is a spend, not a reading, and this gauge has no
+    business calling it.
+    """
+    env = dict(os.environ, CODEX_HOME=home)
+    try:
+        proc = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, env=env)
+    except OSError:
+        return None
+    try:
+        for msg in ({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                     "params": {"clientInfo": {"name": "dipstick", "version": "0",
+                                               "title": "dipstick"}}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read",
+                     "params": {}}):
+            proc.stdin.write(json.dumps(msg) + "\n")
+        proc.stdin.flush()
+        deadline = time.time() + CODEX_RPC_TIMEOUT
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            try:
+                reply = json.loads(line)
+            except ValueError:
+                continue
+            if reply.get("id") == 2:
+                return (reply.get("result") or {}) if "result" in reply else None
+        return None
+    except (OSError, ValueError):
+        return None
+    finally:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def codex_live_rows(db, live_total):
+    """One row per account (plus one per model cap), read live via app-server.
+
+    Returns (rows, covered_plans). Homes that resolve to the same account are
+    read once; a home whose server does not answer is left to the rollout scan.
+    """
+    exe = codex_bin()
+    if not exe:
+        return [], set()
+    rows, covered, seen_accounts = [], set(), set()
+    for home, claims in _codex_claims():
+        auth = claims.get("https://api.openai.com/auth") or {}
+        acct_id = auth.get("chatgpt_account_id") or claims.get("email")
+        if not acct_id or acct_id in seen_accounts:
+            continue
+        seen_accounts.add(acct_id)
+        key = "codex_rpc:" + str(acct_id)
+        body, age = cache_get(db, key, CODEX_RPC_TTL)
+        if body is None:
+            body = _codex_rpc_read(home, exe)
+            if body is not None:
+                cache_put(db, key, body)
+                age = 0.0
+            else:
+                body, age = cache_get(db, key)      # any age beats nothing
+        if not body:
+            continue
+        stale = (age or 0.0) / 3600
+        seen = datetime.datetime.now() - datetime.timedelta(seconds=age or 0)
+        by_id = body.get("rateLimitsByLimitId") or {}
+        if not by_id and body.get("rateLimits"):
+            by_id = {"codex": body["rateLimits"]}
+        plan = (body.get("rateLimits") or {}).get("planType") or auth.get("chatgpt_plan_type")
+        email = claims.get("email", "계정 미상")
+        note = L("실시간 (%.0fh 전)" % stale if stale >= 1 else "실시간",
+                 "live (%.0fh ago)" % stale if stale >= 1 else "live")
+        for lid, rl in by_id.items():
+            wins = []
+            for k in ("primary", "secondary"):
+                w = rl.get(k)
+                if not w or w.get("usedPercent") is None:
+                    continue
+                remaining = 100 - float(w["usedPercent"])
+                minutes = w.get("windowDurationMins")
+                resets = (datetime.datetime.fromtimestamp(w["resetsAt"])
+                          if w.get("resetsAt") else None)
+                sur = pace_surplus(remaining, minutes, resets)
+                wins.append({"name": window_label(minutes), "remaining": remaining,
+                             "minutes": minutes, "resets": resets, "surplus": sur,
+                             "verdict": verdict(remaining,
+                                                hours_until(resets) if resets else 0,
+                                                stale, live_total if lid == "codex" else 0,
+                                                is_imminent(resets), sur)})
+            if not wins:
+                continue
+            rows.append({"sub": sub_label("Codex", plan), "account": email,
+                         "pool": None if lid == "codex" else (rl.get("limitName") or lid),
+                         "windows": wins, "note": note})
+        if plan:
+            covered.add(plan)
+    return rows, covered
+
+
 def codex_rows(db, live_total):
+    live, covered = codex_live_rows(db, live_total)
+    scanned = [r for r in codex_scan_rows(db, live_total)
+               if not any(r["sub"] == sub_label("Codex", p) for p in covered)]
+    # The rollout scan can no longer name the account behind a record: newer
+    # CLIs write plan_type null, which used to surface as a "Codex ?" card with
+    # a fresh figure nobody could attribute. When the live read has answered
+    # for every account it knows, that phantom carries nothing the live rows do
+    # not, so it is dropped rather than shown.
+    if live:
+        scanned = [r for r in scanned if r["sub"] != sub_label("Codex", None)]
+    return live + scanned
+
+
+def codex_scan_rows(db, live_total):
     emails = codex_plan_to_email()
     cutoff = now - datetime.timedelta(days=14)
     cache = {ino: (mtime, ts, plan, payload) for ino, mtime, ts, plan, payload
@@ -1149,7 +1293,9 @@ def agy_rows():
         acct = "계정 미상"
     base = {"account": acct, "sub": "Antigravity", "pool": None, "windows": []}
     try:
-        out = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+        # A GUI launch may carry a PATH without /usr/sbin; name the binary outright.
+        lsof = shutil.which("lsof") or "/usr/sbin/lsof"
+        out = subprocess.run([lsof, "-nP", "-iTCP", "-sTCP:LISTEN"],
                              capture_output=True, text=True, timeout=20).stdout
     except (OSError, subprocess.TimeoutExpired):
         return [dict(base, note="포트 탐색 실패")]
