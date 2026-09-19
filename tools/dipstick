@@ -1285,6 +1285,22 @@ def claude_install_rows(db, config_dir, services, quiet=False):
     return [dict(base, windows=wins, note=note)]
 
 
+def _language_server_csrf(pid):
+    """The desktop app's language server takes `--csrf_token <value>` on its
+    command line; that value is what its own HTTP port expects back."""
+    try:
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout.split()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for i, arg in enumerate(cmd):
+        if arg == "--csrf_token" and i + 1 < len(cmd):
+            return cmd[i + 1]
+        if arg.startswith("--csrf_token="):
+            return arg.split("=", 1)[1]
+    return None
+
+
 def agy_rows():
     """agy holds quota in memory and serves it on a per-process local port."""
     try:
@@ -1299,15 +1315,34 @@ def agy_rows():
                              capture_output=True, text=True, timeout=20).stdout
     except (OSError, subprocess.TimeoutExpired):
         return [dict(base, note="포트 탐색 실패")]
-    ports = [int(m.group(1)) for line in out.splitlines() if line.split()[:1] == ["agy"]
-             for m in [re.search(r"127\.0\.0\.1:(\d+)", line)] if m]
-    if not ports:
-        return [dict(base, note=L("실행 중인 agy 없음 — 하나 띄우면 조회됨", "no agy running — start one and it reads"))]
+    # Two hosts serve this RPC. The `agy` CLI answers a bare POST. The desktop
+    # app (Antigravity.app) runs the same language server, but it guards the
+    # port with a CSRF token -- a localhost IPC secret meant to keep web pages
+    # out, handed to the server on its own command line, which the app itself
+    # is the reader of. Both are this user's own processes; the token is read
+    # from the process table the way the app reads it, and sent as the header
+    # the app sends. Nothing leaves the machine.
+    targets = []          # (port, csrf-or-None)
+    for line in out.splitlines():
+        cols = line.split()
+        m = re.search(r"127\.0\.0\.1:(\d+)", line)
+        if not m or len(cols) < 2:
+            continue
+        if cols[0] == "agy":
+            targets.append((int(m.group(1)), None))
+        elif cols[0].startswith("language_"):
+            targets.append((int(m.group(1)), _language_server_csrf(cols[1])))
+    if not targets:
+        return [dict(base, note=L("실행 중인 agy·Antigravity 없음 — 하나 띄우면 조회됨",
+                                  "no agy or Antigravity running — start one and it reads"))]
 
     body = None
-    for p in sorted(ports, reverse=True):
+    for p, csrf in sorted(targets, reverse=True):
+        headers = {"Content-Type": "application/json"}
+        if csrf:
+            headers["X-Codeium-Csrf-Token"] = csrf
         req = urllib.request.Request(f"http://127.0.0.1:{p}{AGY_RPC}", data=b"{}",
-                                     headers={"Content-Type": "application/json"})
+                                     headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=6) as r:
                 body = json.load(r)

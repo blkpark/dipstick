@@ -37,7 +37,7 @@ Orca 를 쓰고 있다면 그때는 같이 물린다 ([Orca 같은 다계정 래
 |---|---|---|
 | Codex | CLI 자체 `app-server` 의 `account/rateLimits/read`, 계정별; 세션 rollout 은 폴백·토큰 이력용 | 없음 — 로컬 RPC |
 | Claude Code | `GET /api/oauth/usage` — CLI 가 쓰는 그 엔드포인트 | 없음 — 사용량 조회만 |
-| Antigravity (`agy`) | 실행 중인 agent 의 로컬 RPC `RetrieveUserQuotaSummary` | 없음 — localhost |
+| Antigravity | 실행 중인 `agy` 또는 데스크톱 앱 language server 의 로컬 RPC `RetrieveUserQuotaSummary` | 없음 — localhost |
 | ZCode (Z.ai GLM 코딩 플랜) | 앱이 Local Storage 에 캐시한 엔타이틀먼트 스냅샷 | 없음 — 로컬 파일 |
 
 Codex rollout 은 수 GB 까지 커지므로 파싱 결과를 inode 기준으로 캐시한다. 첫 실행 뒤
@@ -52,7 +52,7 @@ macOS 13 이상, Python 3.9 이상(시스템에 딸린 것으로 충분). 패키
 |---|---|---|
 | Claude Code | OAuth 사용량 엔드포인트 (로그인 keychain) | 카드가 안 뜰 뿐 |
 | Codex CLI | 자체 `app-server` (와 `~/.codex` 세션 rollout) | 〃 |
-| Antigravity | 실행 중 agent 의 로컬 RPC | 〃 |
+| Antigravity | 실행 중 `agy` 또는 데스크톱 앱의 로컬 RPC | 〃 |
 | ZCode | 앱이 캐시한 엔타이틀먼트 스냅샷 | 〃 |
 
 이 중 하나만 있어도 된다.

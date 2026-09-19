@@ -46,7 +46,7 @@ quota.
 |---|---|---|
 | Codex | `account/rateLimits/read` on the CLI's own `app-server`, per account; session rollouts as fallback and for token history | none — local RPC |
 | Claude Code | `GET /api/oauth/usage`, the endpoint the CLI itself uses | none — metering only |
-| Antigravity (`agy`) | `RetrieveUserQuotaSummary` on the running agent's local RPC | none — localhost |
+| Antigravity | `RetrieveUserQuotaSummary` on the local RPC of a running `agy` or of the desktop app's language server | none — localhost |
 | ZCode (Z.ai GLM coding plan) | the entitlement snapshot the app caches in its Local Storage | none — local file |
 
 Codex rollouts can run to several GB, so parses are cached by inode; after the
@@ -61,7 +61,7 @@ orchestrator — dipstick reads whatever is installed and skips the rest:
 |---|---|---|
 | Claude Code | its OAuth usage endpoint (login keychain) | card simply not shown |
 | Codex CLI | its `app-server` (and `~/.codex` session rollouts) | 〃 |
-| Antigravity | the running agent's local RPC | 〃 |
+| Antigravity | the running `agy` or desktop app's local RPC | 〃 |
 | ZCode | the app's cached entitlement snapshot | 〃 |
 
 Any one of them is enough.
