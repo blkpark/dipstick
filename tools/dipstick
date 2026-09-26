@@ -1048,35 +1048,117 @@ def claude_account(db=None, config_dir=None):
     return email or "계정 미상"
 
 
-def claude_credentials(services=None):
-    """(oauth, note). First usable credential across the given keychain entries.
+def claude_credentials(services=None, files=()):
+    """(cred, note). The freshest usable credential across the given stores.
 
     An entry can exist and still be logged out: the CLI leaves the record behind
     with an empty accessToken and expiresAt of 0. Reading that as "expired" sent
     people off to refresh a token that was never there, so an absent token and a
-    stale one are told apart -- and a wrapper's own copy is tried before giving up,
-    since the default entry is often the logged-out one.
+    stale one are told apart.
+
+    Several stores can hold the same login -- the CLI's keychain entry, its
+    per-config-dir entry, a wrapper's managed copy, the `.credentials.json` file
+    -- and they drift: one gets a rotated token, another keeps the dead one.
+    Taking the first entry with any token picked a dead copy while a live one sat
+    beside it, so the one with the latest expiry wins.
     """
-    found_any = False
-    for service in (services or CLAUDE_KEYCHAINS):
-        account, raw = _keychain_read(service)
-        if raw is False:
-            return None, L("keychain 읽기 실패 (접근 승인 필요)",
-                           "keychain read failed (access approval needed)")
+    found_any, best = False, None
+    stores = [("keychain", s) for s in (services or CLAUDE_KEYCHAINS)] + \
+             [("file", f) for f in files]
+    for kind, where in stores:
+        if kind == "keychain":
+            account, raw = _keychain_read(where)
+            if raw is False:
+                return None, L("keychain 읽기 실패 (접근 승인 필요)",
+                               "keychain read failed (access approval needed)")
+        else:
+            account = ""
+            try:
+                raw = open(where).read()
+            except OSError:
+                raw = ""
         if not raw:
             continue
         found_any = True
         try:
             doc = json.loads(raw)
             oauth = doc["claudeAiOauth"]
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             continue
-        if oauth.get("accessToken"):
-            return {"oauth": oauth, "doc": doc, "service": service, "account": account}, ""
+        if not oauth.get("accessToken"):
+            continue
+        cand = {"oauth": oauth, "doc": doc, "service": where if kind == "keychain" else None,
+                "file": where if kind == "file" else None, "account": account}
+        if best is None or (oauth.get("expiresAt") or 0) > (best["oauth"].get("expiresAt") or 0):
+            best = cand
+    if best:
+        best["stores"] = stores
+        return best, ""
     if not found_any:
         return None, L("keychain 항목 없음 또는 접근 거부", "no keychain entry, or access denied")
     return None, L("로그아웃 상태 — `claude auth login` 하면 읽힌다",
                    "logged out — run `claude auth login` and it will read")
+
+
+def _store_write(kind, where, account, doc):
+    """Write a whole credential document back to one store. True on success."""
+    body = json.dumps(doc)
+    try:
+        if kind == "keychain":
+            subprocess.run(["security", "add-generic-password", "-U", "-s", where,
+                            "-a", account or os.environ.get("USER", ""), "-w", body],
+                           capture_output=True, text=True, timeout=30, check=True)
+        else:
+            tmp = where + ".dipstick-tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(body)
+            os.replace(tmp, where)
+        return True
+    except Exception:
+        return False
+
+
+def claude_propagate(cred):
+    """Hand a working token to every sibling store still holding an expired one.
+
+    A multi-account wrapper can keep its own snapshot of the login and write it
+    back over the CLI's stores on start-up or account switch. When that snapshot
+    is older than the last rotation, its refresh token is already dead
+    server-side, and every reader that picks it up -- this gauge included -- is
+    logged out until someone runs `claude auth login`. Updating only the store
+    that was refreshed leaves that snapshot waiting to be restored.
+
+    So once a token is known to work, each sibling store of the same install
+    whose token has expired gets it, the rest of its document kept intact.
+    Stores holding a different token that is still live are left alone: that is
+    somebody else's session, not a stale copy of this one.
+    """
+    fresh = cred["oauth"]
+    for kind, where in cred.get("stores") or []:
+        if where in (cred.get("service"), cred.get("file")):
+            continue
+        if kind == "keychain":
+            account, raw = _keychain_read(where)
+        else:
+            account = ""
+            try:
+                raw = open(where).read()
+            except OSError:
+                continue
+        if not raw:
+            continue
+        try:
+            doc = json.loads(raw)
+            old = doc.get("claudeAiOauth") or {}
+        except ValueError:
+            continue
+        if old.get("refreshToken") == fresh.get("refreshToken"):
+            continue
+        if (old.get("expiresAt") or 0) / 1000 > now.timestamp():
+            continue
+        doc["claudeAiOauth"] = dict(old, **fresh)
+        _store_write(kind, where, account, doc)
 
 
 def _keychain_read(service):
@@ -1145,18 +1227,16 @@ def claude_refresh(cred):
         merged["expiresAt"] = int((now.timestamp() + float(fresh["expires_in"])) * 1000)
     doc = dict(cred["doc"])
     doc["claudeAiOauth"] = merged
-    try:
-        subprocess.run(["security", "add-generic-password", "-U",
-                        "-s", cred["service"], "-a", cred["account"] or os.environ.get("USER", ""),
-                        "-w", json.dumps(doc)],
-                       capture_output=True, text=True, timeout=30, check=True)
-    except Exception:
+    kind, where = ("keychain", cred["service"]) if cred.get("service") else ("file", cred.get("file"))
+    if not where or not _store_write(kind, where, cred.get("account"), doc):
         # The live token still works for this run even if it could not be stored;
         # a gauge that refuses to read because it could not write is worse.
         cred["oauth"] = merged
         return merged, L("갱신됨 (keychain 저장 실패 — 이번 실행에만 적용)",
                          "refreshed (could not store it; applies to this run only)")
     cred["oauth"] = merged
+    cred["doc"] = doc
+    claude_propagate(cred)
     return merged, ""
 
 
@@ -1197,22 +1277,38 @@ def claude_install_rows(db, config_dir, services, quiet=False):
     cache_key = "claude_usage"
     if config_dir != os.path.expanduser("~/.claude"):
         cache_key += ":" + config_dir
-    cred, err = claude_credentials(services)
+    cred, err = claude_credentials(services, [os.path.join(config_dir, ".credentials.json")])
     if err:
         return [] if quiet else [dict(base, note=err)]
     oauth = cred["oauth"]
 
     base["sub"] = sub_label("Claude", oauth.get("subscriptionType"))
     note = ""
+    # Hours since the figure was fetched, when it is served from an old cache.
+    # A dead login used to blank the card -- the subscription vanished from the
+    # menu bar exactly when its owner most needed to see it -- so the last good
+    # reading stays up, graded STALE, with the reason beside it.
+    stale_h = 0.0
+    offline = False
     expires = oauth.get("expiresAt") or 0
     if expires and expires / 1000 < now.timestamp():
         oauth, why = claude_refresh(cred)
         if oauth is None:
-            return [dict(base, note=why)]
-        note = why or L("토큰 갱신됨", "token refreshed")
-        cache_drop(db, cache_key)
-    body, age = cache_get(db, cache_key, CLAUDE_TTL)
-    if body is None:
+            body, age = cache_get(db, cache_key)
+            if body is None:
+                return [dict(base, note=why)]
+            stale_h = (age or 0.0) / 3600
+            note = why + L(" · 마지막 값 %.0fh 전" % stale_h,
+                           " · last reading %.0fh ago" % stale_h)
+            offline = True
+        else:
+            note = why or L("토큰 갱신됨", "token refreshed")
+            cache_drop(db, cache_key)
+    if not offline:
+        body, age = cache_get(db, cache_key, CLAUDE_TTL)
+    if offline:
+        pass
+    elif body is None:
         req = urllib.request.Request(CLAUDE_USAGE_URL, headers={
             "Authorization": f"Bearer {oauth['accessToken']}",
             "anthropic-beta": "oauth-2025-04-20",
@@ -1221,6 +1317,7 @@ def claude_install_rows(db, config_dir, services, quiet=False):
             with urllib.request.urlopen(req, timeout=25) as r:
                 body = json.load(r)
             cache_put(db, cache_key, body)
+            claude_propagate(cred)          # proven live: heal expired siblings
         except Exception as e:
             # A 401 on a token that looked live means it was revoked or rotated
             # early; the stored expiry is a hint, not the authority.
@@ -1246,6 +1343,7 @@ def claude_install_rows(db, config_dir, services, quiet=False):
                     hint = ("조회 한도 — 잠시 후 재시도" if getattr(e, "code", None) == 429
                             else "토큰 만료면 claude 재실행, 아니면 endpoint 변경 의심")
                     return [dict(base, note=f"{reason} — {hint}")]
+                stale_h = (age or 0.0) / 3600
                 note = f"{reason} — 마지막 성공값 사용 ({age / 60:.0f}분 전)"
     elif age and age > 5:
         note = L(f"캐시 {age:.0f}초 전 (엔드포인트 폴링 한도 회피)", f"cached {age:.0f}s ago (endpoint rate-limits polling)")
@@ -1262,7 +1360,7 @@ def claude_install_rows(db, config_dir, services, quiet=False):
         wins.append({"name": window_label(mins), "remaining": remaining,
                      "minutes": mins, "resets": resets, "surplus": sur,
                      "verdict": verdict(remaining, hours_until(resets) if resets else 0,
-                                        imminent=is_imminent(resets), surplus=sur)})
+                                        stale_h, imminent=is_imminent(resets), surplus=sur)})
     # The limits array carries what the top-level fields do not: per-model weekly
     # caps ("weekly_scoped" with scope.model, e.g. Fable on Max plans). session and
     # weekly_all just mirror five_hour/seven_day, so only scoped entries are read.
@@ -1281,7 +1379,7 @@ def claude_install_rows(db, config_dir, services, quiet=False):
         wins.append({"name": f"{model} · {name}", "remaining": remaining,
                      "minutes": mins2, "resets": resets, "surplus": sur,
                      "verdict": verdict(remaining, hours_until(resets) if resets else 0,
-                                        imminent=is_imminent(resets), surplus=sur)})
+                                        stale_h, imminent=is_imminent(resets), surplus=sur)})
     return [dict(base, windows=wins, note=note)]
 
 

@@ -134,8 +134,17 @@ call Anthropic's own usage endpoint and is never stored or sent anywhere else.
 When the token has expired, dipstick renews it through the same OAuth refresh
 flow the CLI uses and writes the result back to the same keychain entry — the
 whole entry, so nothing else stored in it is lost, and every reader picks up
-the same token instead of racing over rotations. Only a reading that says
-*logged out* needs you: `claude auth login` restores it.
+the same token instead of racing over rotations. The same login often lives in
+several stores at once — the CLI's entry, its per-directory entry, a wrapper's
+managed copy, `~/.claude/.credentials.json` — so dipstick reads whichever holds
+the latest token, and once a token is proven live it is also handed to any
+sibling store still holding an expired one. That matters when a wrapper restores
+its own snapshot over the others: if the snapshot is older than the last
+rotation, its refresh token is already dead, and without the hand-off every
+reader would be logged out again after each restore. If a refresh does fail,
+the last good reading stays on the card, graded STALE, with the reason beside
+it. Only a reading that says *logged out* needs you: `claude auth login`
+restores it.
 
 ## Use
 
