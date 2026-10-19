@@ -36,6 +36,13 @@ struct Subscription: Decodable {
     let reserve: Reserve?
     let windows: [Window]
     let note: String
+    /// Optional so a snapshot from an older CLI still decodes.
+    let credits: Credits?
+}
+
+struct Credits: Decodable {
+    let enabled: Bool
+    let text: String?
 }
 
 struct Reserve: Decodable {
@@ -466,7 +473,8 @@ extension AppDelegate {
                 seen[s.account] = masked
                 return Subscription(sub: s.sub, key: s.key, account: masked,
                                     isMain: s.isMain, selectable: s.selectable,
-                                    reserve: s.reserve, windows: s.windows, note: s.note)
+                                    reserve: s.reserve, windows: s.windows, note: s.note,
+                                    credits: s.credits)
             },
             runningCodex: raw.runningCodex, mainMode: raw.mainMode,
             barWindow: raw.barWindow, nextLaunch: raw.nextLaunch, strings: raw.strings)

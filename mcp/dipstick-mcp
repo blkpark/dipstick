@@ -161,6 +161,9 @@ def tool_quota_status(args):
                 "is_main": s.get("isMain"),
                 "reserve": s.get("reserve"),
                 "note": s.get("note") or None,
+                # Display only: credits are spend past the plan limit, a money
+                # decision -- not headroom for can_i_start to count.
+                "credits": s.get("credits"),
                 "windows": [slim_window(w) for w in s.get("windows", [])],
             }
             for s in subs_of(snap, args.get("vendor"))

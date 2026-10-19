@@ -349,6 +349,13 @@ CREATE TABLE IF NOT EXISTS samples(
   remaining REAL NOT NULL, resets_at TEXT);
 CREATE INDEX IF NOT EXISTS samples_sub_time ON samples(sub, taken_at);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Credit series per subscription. kind=balance (Codex: drops as credits are
+-- spent, rises on a top-up) or used (Claude: month-to-date spend, back to zero
+-- at the month boundary). Nobody reports "spent today", so it is derived from
+-- consecutive readings here.
+CREATE TABLE IF NOT EXISTS credits(
+  taken_at TEXT NOT NULL, sub TEXT NOT NULL, kind TEXT NOT NULL, value REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS credits_sub_time ON credits(sub, taken_at);
 CREATE TABLE IF NOT EXISTS apicache(key TEXT PRIMARY KEY, fetched_at REAL NOT NULL, body TEXT);
 -- Token spend, bucketed by hour. Local logs only: what this machine did.
 CREATE TABLE IF NOT EXISTS tokens(
@@ -653,7 +660,105 @@ def cache_drop(db, key):
     db.commit()
 
 
+def _money(x):
+    """A money-ish field as a float: {"amount_minor", "exponent"}, a number, or a
+    numeric string. None when absent or unreadable."""
+    if x is None:
+        return None
+    if isinstance(x, dict):
+        if x.get("amount_minor") is None:
+            return None
+        return float(x["amount_minor"]) / (10 ** int(x.get("exponent") or 0))
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def record_credits(db, rows):
+    seen = set()
+    for r in rows:
+        c = r.get("credit")
+        if not c or r["sub"] in seen or c.get("value") is None:
+            continue
+        seen.add(r["sub"])
+        db.execute("INSERT INTO credits(taken_at,sub,kind,value) VALUES(?,?,?,?)",
+                   (now.isoformat(timespec="seconds"), r["sub"], c["kind"], c["value"]))
+    db.execute("DELETE FROM credits WHERE taken_at < datetime('now','-40 days')")
+    db.commit()
+
+
+def credit_spent(db, sub, kind, start):
+    """(amount spent since `start`, first reading time if it is later than `start`).
+
+    Only consumption is summed: a balance that rises is a top-up, a used total
+    that falls is a month rollover -- neither is spending. The reading just
+    before `start` is the baseline, so the first drop of the period counts. When
+    the series begins inside the period the second value says so: what is shown
+    is spending since the gauge started watching, not the whole period.
+    """
+    first = db.execute("SELECT taken_at,value FROM credits WHERE sub=? AND kind=? AND taken_at<? "
+                       "ORDER BY taken_at DESC LIMIT 1",
+                       (sub, kind, start.isoformat(timespec="seconds"))).fetchone()
+    later = db.execute("SELECT taken_at,value FROM credits WHERE sub=? AND kind=? AND taken_at>=? "
+                       "ORDER BY taken_at", (sub, kind, start.isoformat(timespec="seconds"))).fetchall()
+    series = ([first] if first else []) + later
+    if not series:
+        return None, None
+    spent, prev = 0.0, series[0][1]
+    for _, v in series[1:]:
+        if kind == "balance":
+            spent += max(0.0, prev - v)
+        else:
+            spent += (v - prev) if v >= prev else v
+        prev = v
+    since = None if first else datetime.datetime.fromisoformat(series[0][0])
+    return spent, since
+
+
+def credit_view(db, sub, c):
+    """What a card shows for credits: remaining, spent today, spent this week."""
+    if not c:
+        return None
+    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week0 = day0 - datetime.timedelta(days=day0.weekday())        # Monday
+    out = {"unit": c.get("unit"), "enabled": bool(c.get("enabled")),
+           "remaining": c.get("remaining")}
+    for key, start in (("today", day0), ("week", week0)):
+        spent, since = credit_spent(db, sub, c["kind"], start) if c.get("value") is not None else (None, None)
+        out[key] = round(spent, 2) if spent is not None else None
+        out[key + "Since"] = since.isoformat(timespec="minutes") if since else None
+    out["text"] = credit_text(out)      # the menu panel renders this verbatim
+    return out
+
+
+def credit_text(cv):
+    """One line for the text report and the menu panel."""
+    if not cv:
+        return ""
+    if not cv["enabled"]:
+        # Codex credits are a prepaid balance; Claude's are pay-as-you-go
+        # "extra usage" past the plan limit. Off means different things.
+        return (L("크레딧 없음", "no credits") if cv["unit"] in (None, "credits")
+                else L("추가 사용 꺼짐", "extra usage off"))
+    unit = "" if cv["unit"] in (None, "credits") else " " + cv["unit"]
+    def amt(v):
+        return "?" if v is None else ("{:,.0f}".format(v) if abs(v) >= 100 else "{:,.2f}".format(v))
+    parts = []
+    if cv["remaining"] is not None:
+        parts.append(L("잔여 ", "left ") + amt(cv["remaining"]) + unit)
+    parts.append(L("오늘 ", "today ") + amt(cv["today"]))
+    parts.append(L("이번 주 ", "this week ") + amt(cv["week"]))
+    line = L("크레딧 ", "credits ") + " · ".join(parts)
+    since = cv.get("weekSince") or cv.get("todaySince")
+    if since:
+        line += L(" (기록 %s 부터)" % since[5:16].replace("T", " "),
+                  " (recorded since %s)" % since[5:16].replace("T", " "))
+    return line
+
+
 def record_samples(db, rows):
+    record_credits(db, rows)
     db.executemany(
         "INSERT INTO samples(taken_at,sub,window,remaining,resets_at) VALUES(?,?,?,?,?)",
         [(now.isoformat(timespec="seconds"), r["sub"], w["name"], w["remaining"],
@@ -901,9 +1006,16 @@ def codex_live_rows(db, live_total):
                                                 is_imminent(resets), sur)})
             if not wins:
                 continue
-            rows.append({"sub": sub_label("Codex", plan), "account": email,
-                         "pool": None if lid == "codex" else (rl.get("limitName") or lid),
-                         "windows": wins, "note": note})
+            row = {"sub": sub_label("Codex", plan), "account": email,
+                   "pool": None if lid == "codex" else (rl.get("limitName") or lid),
+                   "windows": wins, "note": note}
+            cr = rl.get("credits") if lid == "codex" else None
+            if cr is not None:
+                bal = _money(cr.get("balance"))
+                row["credit"] = {"kind": "balance", "value": bal, "remaining": bal,
+                                 "unit": "credits",
+                                 "enabled": bool(cr.get("hasCredits") or cr.get("unlimited"))}
+            rows.append(row)
         if plan:
             covered.add(plan)
     return rows, covered
@@ -1380,7 +1492,18 @@ def claude_install_rows(db, config_dir, services, quiet=False):
                      "minutes": mins2, "resets": resets, "surplus": sur,
                      "verdict": verdict(remaining, hours_until(resets) if resets else 0,
                                         stale_h, imminent=is_imminent(resets), surplus=sur)})
-    return [dict(base, windows=wins, note=note)]
+    credit = None
+    spend = body.get("spend") if isinstance(body.get("spend"), dict) else None
+    if spend is not None:
+        used = _money(spend.get("used"))
+        limit, bal = _money(spend.get("limit")), _money(spend.get("balance"))
+        currency = ((spend.get("used") or {}).get("currency")
+                    if isinstance(spend.get("used"), dict) else None)
+        credit = {"kind": "used", "value": used, "unit": currency or "USD",
+                  "enabled": bool(spend.get("enabled")),
+                  "remaining": bal if bal is not None else (
+                      (limit - used) if limit is not None and used is not None else None)}
+    return [dict(base, windows=wins, note=note, credit=credit)]
 
 
 def _language_server_csrf(pid):
@@ -1827,6 +1950,9 @@ def render_text(db, rows, consumers):
                 print(f"      -> {state}: {why}")
             if r.get("note"):
                 print(f"    {r['note']}")
+        ctext = credit_text(credit_view(db, sub, next((r["credit"] for r in group if r.get("credit")), None)))
+        if ctext:
+            print(f"    {ctext}")
         print()
     print(L("[실행 중인 codex]", "[running codex]"))
     if not consumers:
@@ -2626,7 +2752,8 @@ def main(argv):
                           "imminent": is_imminent(w.get("resets")),
                           "binds": w is binding_window([w2 for r2 in g for w2 in r2["windows"]])}
                          for r in g for w in r["windows"]],
-                     "note": next((r["note"] for r in g if r.get("note")), "")}
+                     "note": next((r["note"] for r in g if r.get("note")), ""),
+                     "credits": credit_view(db, sub, next((r["credit"] for r in g if r.get("credit")), None))}
                     for sub, account, g in group_by_subscription(rows, main)],
                 "runningCodex": [{"home": h, "count": n} for h, n in consumers.most_common()],
                 # the menu bar app renders these verbatim so one language holds

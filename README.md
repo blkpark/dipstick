@@ -251,6 +251,27 @@ Effort never reaches dipstick at all. It changes how much a run spends, so it
 surfaces afterwards as a bigger number in the token history — the setting itself
 is not something the gauge can see.
 
+## Credits
+
+Credits are what lets work continue past a plan's limit — Codex's prepaid
+credit balance, Claude's pay-as-you-go *extra usage*. Each card shows what is
+left, what was spent today and what was spent this week (from Monday):
+
+```
+credits left 61,288 · today 0.00 · this week 0.00
+```
+
+Neither vendor reports spending per day, so it is derived: the balance (Codex)
+or the month-to-date total (Claude) is recorded on every refresh, and only
+consumption between readings is counted — a top-up or a month rollover is not
+spending. Until a full period has been recorded the line says since when.
+
+Credits are shown, never weighed. Spending past a plan limit is a money
+decision, so they stay out of the pace pick and out of `can_i_start`; the MCP
+`quota_status` carries them for display. Nothing is ever consumed — the Codex
+server exposes a reset-credit consumer beside the reading, and dipstick does
+not call it.
+
 ## Tokens
 
 The dashboard also shows what this machine actually spent, read from the same

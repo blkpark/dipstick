@@ -159,6 +159,13 @@ struct SubscriptionBlock: View {
             if !sub.note.isEmpty {
                 Text(sub.note).font(.dsCaption).foregroundStyle(.tertiary)
             }
+            // Credits are shown, never weighed: spending past a plan limit is a
+            // money decision, so they stay out of the pace pick entirely.
+            if let credits = sub.credits, let text = credits.text, !text.isEmpty {
+                Label(text, systemImage: "creditcard")
+                    .font(.dsCaption)
+                    .foregroundStyle(credits.enabled ? .secondary : .tertiary)
+            }
             if sub.selectable {
                 Button(sub.isMain ? (strings["unsetMain"] ?? "Unset as main")
                                   : (strings["setAsMain"] ?? "Set as main")) {
