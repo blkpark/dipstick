@@ -46,7 +46,7 @@ quota.
 |---|---|---|
 | Codex | `account/rateLimits/read` on the CLI's own `app-server`, per account; session rollouts as fallback and for token history | none — local RPC |
 | Claude Code | `GET /api/oauth/usage`, the endpoint the CLI itself uses | none — metering only |
-| Antigravity | `RetrieveUserQuotaSummary` on the local RPC of a running `agy` or of the desktop app's language server | none — localhost |
+| Antigravity | `RetrieveUserQuotaSummary` on the local RPC of the desktop app's language server (or an `agy` CLI older than 1.4.3, which did not guard its port); the last reading is kept when neither answers | none — localhost |
 | ZCode (Z.ai GLM coding plan) | the entitlement snapshot the app caches in its Local Storage | none — local file |
 
 Codex rollouts can run to several GB, so parses are cached by inode; after the

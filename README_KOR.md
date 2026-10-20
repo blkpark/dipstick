@@ -37,7 +37,7 @@ Orca 를 쓰고 있다면 그때는 같이 물린다 ([Orca 같은 다계정 래
 |---|---|---|
 | Codex | CLI 자체 `app-server` 의 `account/rateLimits/read`, 계정별; 세션 rollout 은 폴백·토큰 이력용 | 없음 — 로컬 RPC |
 | Claude Code | `GET /api/oauth/usage` — CLI 가 쓰는 그 엔드포인트 | 없음 — 사용량 조회만 |
-| Antigravity | 실행 중인 `agy` 또는 데스크톱 앱 language server 의 로컬 RPC `RetrieveUserQuotaSummary` | 없음 — localhost |
+| Antigravity | 데스크톱 앱 language server 의 로컬 RPC `RetrieveUserQuotaSummary` (1.4.3 이전 `agy` CLI 도 가능 — 그 뒤로는 포트에 토큰을 걸었다). 둘 다 안 답하면 마지막 값을 유지 | 없음 — localhost |
 | ZCode (Z.ai GLM 코딩 플랜) | 앱이 Local Storage 에 캐시한 엔타이틀먼트 스냅샷 | 없음 — 로컬 파일 |
 
 Codex rollout 은 수 GB 까지 커지므로 파싱 결과를 inode 기준으로 캐시한다. 첫 실행 뒤

@@ -1522,7 +1522,7 @@ def _language_server_csrf(pid):
     return None
 
 
-def agy_rows():
+def agy_rows(db=None):
     """agy holds quota in memory and serves it on a per-process local port."""
     try:
         acct = json.load(open(GOOGLE_ACCOUNTS)).get("active") or "계정 미상"
@@ -1554,10 +1554,10 @@ def agy_rows():
         elif cols[0].startswith("language_"):
             targets.append((int(m.group(1)), _language_server_csrf(cols[1])))
     if not targets:
-        return [dict(base, note=L("실행 중인 agy·Antigravity 없음 — 하나 띄우면 조회됨",
-                                  "no agy or Antigravity running — start one and it reads"))]
+        return _agy_cached(db, base, L("실행 중인 agy·Antigravity 없음 — 하나 띄우면 조회됨",
+                                       "no agy or Antigravity running — start one and it reads"))
 
-    body = None
+    body, refused = None, False
     for p, csrf in sorted(targets, reverse=True):
         headers = {"Content-Type": "application/json"}
         if csrf:
@@ -1568,11 +1568,35 @@ def agy_rows():
             with urllib.request.urlopen(req, timeout=6) as r:
                 body = json.load(r)
             break
+        except urllib.error.HTTPError as e:
+            refused = refused or (e.code == 401 and not csrf)
+            continue
         except Exception:
             continue
     if not body:
-        return [dict(base, note="로컬 RPC 응답 없음")]
+        # agy 1.4.3 put the same CSRF guard on the CLI's own port, and unlike
+        # the desktop app it keeps the token in memory -- only its shell tools
+        # inherit it. There is no honest way to read it from outside, so the
+        # last good reading is served, aged, with the reason stated.
+        why = (L("agy CLI 가 포트에 CSRF 토큰을 요구 — 실시간 값은 Antigravity 앱이 떠 있을 때",
+                 "agy CLI now requires a CSRF token — live figures need the Antigravity app open")
+               if refused else L("로컬 RPC 응답 없음", "local RPC did not answer"))
+        return _agy_cached(db, base, why)
+    if db is not None:
+        cache_put(db, "agy_quota", body)
+    return _agy_parse(body, base, 0.0, "")
 
+
+def _agy_cached(db, base, why):
+    body, age = cache_get(db, "agy_quota") if db is not None else (None, None)
+    if body is None:
+        return [dict(base, note=why)]
+    stale_h = (age or 0.0) / 3600
+    return _agy_parse(body, base, stale_h,
+                      why + L(" · 마지막 값 %.0fh 전" % stale_h, " · last reading %.0fh ago" % stale_h))
+
+
+def _agy_parse(body, base, stale_h, note):
     rows = []
     for g in body.get("response", {}).get("groups", []):
         wins = []
@@ -1590,11 +1614,11 @@ def agy_rows():
                          "remaining": remaining, "minutes": mins3, "resets": resets,
                          "surplus": sur,
                          "verdict": verdict(remaining, hours_until(resets) if resets else 0,
-                                            imminent=is_imminent(resets), surplus=sur)})
+                                            stale_h, imminent=is_imminent(resets), surplus=sur)})
         gname = AGY_GROUP.get(g.get("displayName"))
         rows.append(dict(base, pool=gname() if gname else g.get("displayName"),
-                         windows=wins, note=""))
-    return rows
+                         windows=wins, note=note))
+    return rows or [dict(base, note=note)]
 
 
 def _zcode_snapshots():
@@ -1702,7 +1726,7 @@ def live_codex():
 def collect(db):
     consumers = live_codex()
     rows = (codex_rows(db, sum(consumers.values())) + claude_rows(db)
-            + agy_rows() + zcode_rows())
+            + agy_rows(db) + zcode_rows())
     record_samples(db, rows)
     try:
         ingest_tokens(db)
