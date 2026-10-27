@@ -47,6 +47,7 @@ quota.
 | Codex | `account/rateLimits/read` on the CLI's own `app-server`, per account; session rollouts as fallback and for token history | none — local RPC |
 | Claude Code | `GET /api/oauth/usage`, the endpoint the CLI itself uses | none — metering only |
 | Antigravity | `RetrieveUserQuotaSummary` on the local RPC of the desktop app's language server (or an `agy` CLI older than 1.4.3, which did not guard its port); the last reading is kept when neither answers | none — localhost |
+| OpenCode | OpenRouter key metering endpoint + read-only local Zen message history | none — metering/files |
 | ZCode (Z.ai GLM coding plan) | the entitlement snapshot the app caches in its Local Storage | none — local file |
 
 Codex rollouts can run to several GB, so parses are cached by inode; after the
@@ -62,7 +63,8 @@ orchestrator — dipstick reads whatever is installed and skips the rest:
 | Claude Code | its OAuth usage endpoint (login keychain) | card simply not shown |
 | Codex CLI | its `app-server` (and `~/.codex` session rollouts) | 〃 |
 | Antigravity | the running `agy` or desktop app's local RPC | 〃 |
-| ZCode | the app's cached entitlement snapshot | 〃 |
+| ZCode | the app's cached entitlement snapshot, including no-plan state | 〃 |
+| OpenCode | local auth and message database | 〃 |
 
 Any one of them is enough.
 
@@ -402,3 +404,27 @@ that dispatches work should stay whatever you already use.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## OpenCode and unavailable plans
+
+OpenCode has a display-only card: OpenRouter spending today and this week comes
+from `GET https://openrouter.ai/api/v1/key`, using the OpenRouter key already in
+`~/.local/share/opencode/auth.json`. Only that service receives the key. Responses
+are cached for five minutes per key. These are UTC periods, not local periods.
+`limit_remaining` is the key spending allowance, not the account credit balance;
+when no key limit is configured the card says so instead of claiming zero or
+unlimited credits. Account balance requires a separate management key, which
+dipstick does not request. Failed polls keep the last reading with its age.
+
+Zen free-model tokens today and this week come from a read-only connection to
+`~/.local/share/opencode/opencode.db`, in the computer's local timezone. Only
+assistant messages from provider `opencode` with a `-free` model or `big-pickle` are counted;
+input, output and cache tokens are summed, without double-counting reasoning
+already included in output. Missing or unreadable history is stated explicitly.
+OpenCode usage never enters launch selection or capacity verdicts.
+
+ZCode cards retain cached `no_plan` and logged-out states, including the observation
+time. A missing free-plan meter is not shown as a zero quota.
+
+Claude collection needs a live login. If both access and refresh tokens have
+expired, run `claude auth login`; the next poll replaces the STALE reading.

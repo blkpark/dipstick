@@ -7,6 +7,7 @@ readings. What must not count as spending: a top-up (balance rises) and a month
 rollover (used total drops back toward zero).
 """
 import datetime
+import importlib.machinery
 import importlib.util
 import os
 import sqlite3

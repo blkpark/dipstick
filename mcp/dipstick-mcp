@@ -159,6 +159,7 @@ def tool_quota_status(args):
                 "subscription": s.get("sub"),
                 "account": s.get("account"),
                 "is_main": s.get("isMain"),
+                "display_only": s.get("displayOnly", False),
                 "reserve": s.get("reserve"),
                 "note": s.get("note") or None,
                 # Display only: credits are spend past the plan limit, a money
@@ -176,6 +177,8 @@ def tool_can_i_start(args):
     snap = snapshot()
     verdicts = []
     for s in subs_of(snap, args.get("vendor")):
+        if s.get("displayOnly"):
+            continue
         wins = s.get("windows", [])
         if not wins:
             verdicts.append({
