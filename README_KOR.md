@@ -361,3 +361,22 @@ claude() { _dipstick_run claude "$@" }
 ## 라이선스
 
 MIT — [LICENSE](LICENSE) 참고.
+
+## OpenCode와 플랜 없는 상태
+
+OpenCode 카드는 표시 전용이다. OpenRouter 오늘·이번 주 사용액은 기존
+`~/.local/share/opencode/auth.json`의 OpenRouter 키로 `GET /api/v1/key`를 조회한다.
+키는 OpenRouter에만 보내며 응답은 키별로 5분 캐시한다. 기간은 UTC 기준이다.
+잔여 값은 계정 전체 잔액이 아닌 키 지출 한도다. 한도가 없으면 `미설정`으로 표시한다.
+계정 잔액용 관리 키는 요구하지 않는다. 조회 실패 시 마지막 값과 경과 시간을 표시한다.
+
+Zen 무료 토큰은 `~/.local/share/opencode/opencode.db`를 읽기 전용으로 열어 계산한다.
+이 컴퓨터 시간대의 오늘·월요일부터 이번 주 기준이며, `opencode` 제공자의 `-free` 모델 또는 `big-pickle`
+assistant 기록만 합산한다. 입력·출력·캐시 토큰 합계이며 출력에 포함된 reasoning은
+중복 계산하지 않는다. 기록 없음과 읽기 실패는 구분한다. OpenCode는 발사 선택에 쓰지 않는다.
+
+ZCode는 플랜 없음·로그인 필요 상태에서도 카드와 관측 시각을 유지한다.
+무료 사용량을 제공하지 않는 상태를 잔량 0으로 표시하지 않는다.
+
+Claude access·refresh token이 모두 만료되면 `claude auth login`이 필요하다.
+재로그인 후 다음 수집에서 오래된 STALE 값이 최신 값으로 바뀐다.

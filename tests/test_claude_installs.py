@@ -5,6 +5,7 @@ which installs get scanned. Run it directly — `python3 tests/test_claude_insta
 The hash is the load-bearing part: get it wrong and a second subscription is
 simply invisible, with no error anywhere to show for it.
 """
+import importlib.machinery
 import importlib.util
 import os
 import sys

@@ -7,6 +7,7 @@ store, its refresh token already dead server-side, and the gauge went dark while
 a live copy sat in a sibling store. File stores only — the keychain is not
 touched.
 """
+import importlib.machinery
 import importlib.util
 import json
 import os
