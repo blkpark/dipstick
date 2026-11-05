@@ -63,7 +63,7 @@ TOOLS = [
         "name": "can_i_start",
         "description": (
             "Should a job of the given length start now? Answers GO, WAIT (with "
-            "the recovery time), or NO_DATA per subscription — never a downgrade "
+            "the recovery time), NO_DATA or NOT_SELECTED per subscription — never a downgrade "
             "suggestion: if the pool is short, the answer is when it recovers, "
             "not which lesser model to use instead. " + DISCIPLINE
         ),
@@ -159,6 +159,7 @@ def tool_quota_status(args):
                 "subscription": s.get("sub"),
                 "account": s.get("account"),
                 "is_main": s.get("isMain"),
+                "codex_active": s.get("codexActive"),
                 "display_only": s.get("displayOnly", False),
                 "reserve": s.get("reserve"),
                 "note": s.get("note") or None,
@@ -180,6 +181,13 @@ def tool_can_i_start(args):
         if s.get("displayOnly"):
             continue
         wins = s.get("windows", [])
+        if s.get("codexActive") is False:
+            verdicts.append({
+                "subscription": s.get("sub"),
+                "verdict": "NOT_SELECTED",
+                "detail": "read for display only — launches use the one chosen Codex account",
+            })
+            continue
         if not wins:
             verdicts.append({
                 "subscription": s.get("sub"),

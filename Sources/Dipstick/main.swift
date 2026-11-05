@@ -32,6 +32,8 @@ struct Subscription: Decodable {
     let key: String
     let account: String
     let isMain: Bool
+    /// nil for other vendors, and from an older CLI.
+    let codexActive: Bool?
     let selectable: Bool
     let reserve: Reserve?
     let windows: [Window]
@@ -472,7 +474,8 @@ extension AppDelegate {
                 let masked = seen[s.account] ?? stand[min(seen.count, stand.count - 1)]
                 seen[s.account] = masked
                 return Subscription(sub: s.sub, key: s.key, account: masked,
-                                    isMain: s.isMain, selectable: s.selectable,
+                                    isMain: s.isMain, codexActive: s.codexActive,
+                                    selectable: s.selectable,
                                     reserve: s.reserve, windows: s.windows, note: s.note,
                                     credits: s.credits)
             },
@@ -537,6 +540,10 @@ extension AppDelegate {
             lastSyncFailed: lastSyncFailed,
             onPick: { [weak self] key in
                 CLI.run(["--set-main", key])
+                self?.refresh()
+            },
+            onCodex: { [weak self] key in
+                CLI.run(["--set-codex", key])
                 self?.refresh()
             },
             onMode: { [weak self] mode in

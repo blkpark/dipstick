@@ -21,6 +21,7 @@ Usage
   dipstick --html [PATH]      write a self-contained page, no server needed
   dipstick --serve [PORT]     local web UI, click to set main (127.0.0.1:8787)
   dipstick --set-main KEY     one of the keys printed by --json, or "auto"
+  dipstick --set-codex KEY    the one Codex account launches may use
   dipstick --main-cmd         print the launch prefix for the current main
   dipstick --lang ko|en       display language (the web UI has a switch too)
 
@@ -1909,6 +1910,37 @@ VENDOR_PREFIX = {"codex": "Codex", "claude": "Claude", "agy": "Antigravity",
                  "zcode": "ZCode"}
 
 
+def codex_selected(db, rows):
+    """The one Codex account launches may use, or None when none is chosen.
+
+    Several Codex accounts can be read, but only one is ever launched on: pace
+    must not move work to another account when this one runs short. An
+    exhausted account stops and is reported; changing it is a human decision.
+    The stored choice wins, then a Codex main, then a lone account.
+    """
+    subs = sorted({r["sub"] for r in rows if r["sub"].startswith("Codex")})
+    for want in (get_setting(db, "codex_account"), get_setting(db, "main")):
+        if want in subs:
+            return want
+    return subs[0] if len(subs) == 1 else None
+
+
+def set_main(db, sub):
+    """Change the main, keeping the Codex choice in step with it."""
+    old = get_setting(db, "main")
+    if sub.startswith("Codex"):
+        set_setting(db, "codex_account", sub)
+    elif old.startswith("Codex") and not get_setting(db, "codex_account"):
+        set_setting(db, "codex_account", old)   # leaving Codex must not forget it
+    set_setting(db, "main", sub)
+
+
+def set_codex(db, sub):
+    set_setting(db, "codex_account", sub)
+    if get_setting(db, "main").startswith("Codex"):
+        set_setting(db, "main", sub)            # a Codex main is that one account
+
+
 def pick_launch(db, rows, vendor=None):
     """(sub, why). Which subscription a new launch should burn.
 
@@ -1918,16 +1950,22 @@ def pick_launch(db, rows, vendor=None):
     main; naming one as main is the explicit opt-in. The main gets MAIN_BONUS of
     stickiness so a marginal difference never flips the account mid-day.
 
-    vendor pins the TOOL: `--vendor codex` answers "which codex account", never
-    swapping in another vendor's CLI. If the pinned main is a different vendor,
-    the pin cannot be honoured for this call, so it falls back to the best pace
-    within the vendor -- the user's typed command wins over the pin.
+    vendor pins the TOOL: `--vendor codex` answers with the one chosen Codex
+    account, never another vendor's CLI. For other vendors, a pinned main of a
+    different vendor cannot be honoured for this call, so the pick falls back to
+    the best pace within the vendor -- the typed command wins over the pin.
     """
     main = get_setting(db, "main")
     mode = get_setting(db, "main_mode", "weighted")
     prefix = VENDOR_PREFIX.get(vendor or "")
     if vendor and not prefix:
         return None, f"unknown vendor: {vendor}"
+    codex = codex_selected(db, rows)
+    if prefix == "Codex":
+        if codex:
+            return codex, L("Codex 지정 계정", "chosen Codex account")
+        return None, L("Codex 계정 미지정 — --set-codex 로 하나를 정한다",
+                       "no Codex account chosen — pick one with --set-codex")
 
     # The pin is absolute for dispatch, scoped for typed commands. An anonymous
     # pick is "run this work somewhere" -- everything goes to the pinned pool,
@@ -1946,6 +1984,8 @@ def pick_launch(db, rows, vendor=None):
     for sub, _, group in group_by_subscription(rows, main):
         if sub.startswith("OpenCode"):
             continue              # usage display, never dispatch capacity
+        if sub.startswith("Codex") and sub != codex:
+            continue              # read for display; only one takes launches
         if sub.startswith("Antigravity") and prefix != "Antigravity":
             # Out of the anonymous pick -- agy is role-fixed (research), so
             # @main never rides it. Asking for it by name (--vendor agy) is the
@@ -1987,10 +2027,9 @@ def pick_launch(db, rows, vendor=None):
 
 def main_launch_cmd(db, rows, vendor=None):
     """(command_prefix, error, warning). Empty error means safe to launch."""
-    sub, _why = pick_launch(db, rows, vendor)
+    sub, why = pick_launch(db, rows, vendor)
     if not sub:
-        return None, L("메인 미지정 — --set-main 으로 정한다",
-                       "no main set — choose one with --set-main"), ""
+        return None, why, ""
     wins = [w for r in rows if r["sub"] == sub for w in r["windows"]]
     floor = reserve_floor(sub)
     warn = ""
@@ -2728,11 +2767,11 @@ def serve(port):
             db = connect()
             try:
                 if key == "auto":
-                    set_setting(db, "main", "")
+                    set_main(db, "")
                 else:
                     rows, _ = collect(db)
                     hit = next((r["sub"] for r in rows if sub_key(r["sub"]) == key), "")
-                    set_setting(db, "main", hit)
+                    set_main(db, hit)
             finally:
                 db.close()
             self._send(303, b"", "text/plain", {"Location": "/"})
@@ -2767,7 +2806,7 @@ def main(argv):
             i = args.index("--set-main")
             key = args[i + 1] if len(args) > i + 1 else ""
             if key == "auto":
-                set_setting(db, "main", "")
+                set_main(db, "")
                 print(L("메인 해제", "main cleared"))
                 return 0
             rows, _ = collect(db)
@@ -2777,8 +2816,21 @@ def main(argv):
                 keys = sorted({sub_key(r["sub"]) for r in rows if not r["sub"].startswith("OpenCode")})
                 print("usage: --set-main " + "|".join(keys + ["auto"]), file=sys.stderr)
                 return 2
-            set_setting(db, "main", hit)
+            set_main(db, hit)
             print(L(f"메인 = {hit}", f"main = {hit}"))
+            return 0
+
+        if "--set-codex" in args:
+            i = args.index("--set-codex")
+            key = args[i + 1] if len(args) > i + 1 else ""
+            rows, _ = collect(db)
+            subs = sorted({r["sub"] for r in rows if r["sub"].startswith("Codex")})
+            hit = next((s for s in subs if sub_key(s) == key), None)
+            if not hit:
+                print("usage: --set-codex " + "|".join(sub_key(s) for s in subs), file=sys.stderr)
+                return 2
+            set_codex(db, hit)
+            print(L(f"Codex 계정 = {hit}", f"Codex account = {hit}"))
             return 0
 
         if "--main-mode" in args:
@@ -2864,6 +2916,7 @@ def main(argv):
         if "--json" in args:
             main = get_setting(db, "main")
             pick, pick_why = pick_launch(db, rows)
+            codex = codex_selected(db, rows)
             print(json.dumps({
                 "takenAt": now.isoformat(timespec="seconds"),
                 "main": main,
@@ -2877,6 +2930,7 @@ def main(argv):
                 "subscriptions": [
                     {"sub": sub, "key": sub_key(sub), "account": account,
                      "isMain": sub == main,
+                     "codexActive": sub == codex if sub.startswith("Codex") else None,
                      "selectable": not sub.startswith(("Antigravity", "OpenCode")),
                      "displayOnly": all(r.get("display_only", False) for r in g),
                      "reserve": (lambda rs: {"state": rs[0], "text": rs[1]} if rs else None)(
@@ -2902,6 +2956,7 @@ def main(argv):
                 "lang": LANG,
                 "strings": {
                     "setAsMain": L("메인으로 지정", "Set as main"),
+                    "useCodex": L("이 Codex 사용", "Use this Codex"),
                     "unsetMain": L("메인 해제", "Unset as main"),
                     "openDashboard": L("대시보드 열기…", "Open dashboard…"),
                     "refresh": L("지금 새로고침", "Refresh now"),

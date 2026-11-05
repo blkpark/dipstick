@@ -128,6 +128,7 @@ struct SubscriptionBlock: View {
     let sub: Subscription
     let strings: [String: String]
     let onPick: (String) -> Void
+    let onCodex: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -166,7 +167,13 @@ struct SubscriptionBlock: View {
                     .font(.dsCaption)
                     .foregroundStyle(credits.enabled ? .secondary : .tertiary)
             }
-            if sub.selectable {
+            if sub.codexActive == false {
+                // Read for display only: one Codex account takes launches.
+                Button(strings["useCodex"] ?? "Use this Codex") { onCodex(sub.key) }
+                    .buttonStyle(.link)
+                    .font(.system(size: 11))
+                    .padding(.top, 1)
+            } else if sub.selectable {
                 Button(sub.isMain ? (strings["unsetMain"] ?? "Unset as main")
                                   : (strings["setAsMain"] ?? "Set as main")) {
                     onPick(sub.isMain ? "auto" : sub.key)
@@ -188,6 +195,7 @@ struct PanelView: View {
     let lastSync: Date?
     let lastSyncFailed: Bool
     let onPick: (String) -> Void
+    let onCodex: (String) -> Void
     let onMode: (String) -> Void
     let onBarWindow: (String) -> Void
     let onDashboard: () -> Void
@@ -319,7 +327,7 @@ struct PanelView: View {
                 SectionHeader(title: strings["subscriptions"] ?? "subscriptions")
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(Array(snap.subscriptions.enumerated()), id: \.offset) { _, sub in
-                        SubscriptionBlock(sub: sub, strings: strings, onPick: onPick)
+                        SubscriptionBlock(sub: sub, strings: strings, onPick: onPick, onCodex: onCodex)
                     }
                 }
 

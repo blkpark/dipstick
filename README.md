@@ -365,10 +365,17 @@ compare directly; a subscription that has no window of that length (Codex meters
 a 7-day window only) falls back to its constraining window rather than vanishing
 from the bar. The panel has the same control.
 
-`--vendor codex` pins the **tool** while the account still follows the pick.
-If the main is pinned to a different vendor, the pick stays inside the vendor
-you asked for — what you typed wins. That makes bare `codex` / `claude`
-routable through a shell function:
+**Codex takes one account.** Every Codex account is read and shown, but launches
+only ever use the one you chose: pace never moves work to another Codex account,
+so one that runs out stops rather than switches. A Codex main is that choice;
+otherwise set it with `dipstick --set-codex KEY` or *Use this Codex* in the panel.
+With several accounts and none chosen, `--vendor codex` refuses to answer. MCP
+`can_i_start` reports the others as `NOT_SELECTED`.
+
+`--vendor` pins the **tool**. For Codex the answer is that one account; for
+others the account still follows the pick. If the main is pinned to a different
+vendor, the pick stays inside the vendor you asked for — what you typed wins.
+That makes bare `codex` / `claude` routable through a shell function:
 
 ```sh
 _dipstick_run() {
