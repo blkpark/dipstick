@@ -23,9 +23,8 @@ Orca 를 쓰고 있다면 그때는 같이 물린다 ([Orca 같은 다계정 래
 
 <img src="assets/screenshot.png" width="620" alt="메뉴바에 구독 3개, 클릭하면 열리는 상세 패널">
 
-계정 3개에 걸친 구독 3개를 한 번에 읽은 화면이다. Codex 두 요금제와 Claude Max 가 각각
-다른 로그인이다. 메뉴바에는 구독마다 숫자 하나씩, 클릭하면 창별 잔량과 페이스, 예비 하한,
-다음 발사가 탈 풀까지 패널에 펼친다.
+구독을 한 번에 읽은 화면이다. 구독마다 로그인이 따로다. 메뉴바에는 구독마다 숫자 하나씩, 클릭하면
+창별 잔량과 페이스, 예비 하한, 크레딧, 다음 발사가 탈 풀까지 패널에 펼친다.
 
 **모델에 프롬프트를 보내지 않는다.** "얼마 남았어?" 를 모델에게 물으면 그 순간 새 창이
 열린다 — 계기가 할 짓이 아니다. 그래서 모든 값은 파일을 그대로 읽거나, 사용량만 알려주고
@@ -59,19 +58,12 @@ macOS 13 이상, Python 3.9 이상(시스템에 딸린 것으로 충분). 패키
 
 ## 같은 도구를 계정 여러 개로 쓸 때
 
-dipstick 이 진짜 필요한 경우다 — 같은 벤더 구독 둘, 계기는 하나, 발사는 여유 있는 쪽으로.
-두 CLI 모두 프로필 전환 기능이 없다. 대신 환경변수로 지정한 홈 디렉터리 아래에 전부
-보관하므로, **계정을 하나 더 쓴다는 건 디렉터리를 하나 더 만든다는 뜻**이다.
+같은 벤더 구독 둘을 계기 하나로 보고, 발사는 여유 있는 쪽으로 보낸다. Claude Code 는 프로필
+전환 기능이 없고 환경변수로 지정한 디렉터리 아래에 전부 보관하므로, **계정을 하나 더 쓴다는 건
+디렉터리를 하나 더 만든다는 뜻**이다. Codex 는 예외다. 한 사람당 계정 하나이므로 dipstick 은
+정확히 하나만 보여주고 그 계정으로만 발사한다([아래](#페이스-그리고-발사-대상-선정)).
 
-**Codex** — `CODEX_HOME` 에 로그인·설정·세션 rollout 이 함께 들어간다.
-
-```sh
-mkdir -p ~/.codex-profiles/work/home
-CODEX_HOME=~/.codex-profiles/work/home codex login     # 다른 계정으로 로그인
-alias codex-work='CODEX_HOME=~/.codex-profiles/work/home codex'
-```
-
-**Claude Code** — `CLAUDE_CONFIG_DIR` 이 같은 역할을 한다. 로그인은 디렉터리가 아니라 로그인
+**Claude Code** — `CLAUDE_CONFIG_DIR` 로 디렉터리를 정한다. 로그인은 디렉터리가 아니라 로그인
 keychain 에 들어가는데, 그 항목 이름이 디렉터리에서 나온다
 (`Claude Code-credentials-<절대경로 sha256 앞 8자리>`). 그래서 config 디렉터리마다 세션이
 따로 잡히고, 새로 로그인해도 앞 계정을 덮어쓰지 않는다.
@@ -81,9 +73,8 @@ CLAUDE_CONFIG_DIR=~/.claude-work claude          # 첫 실행에서 로그인 �
 alias claude-work='CLAUDE_CONFIG_DIR=~/.claude-work claude'
 ```
 
-dipstick 은 이걸 알아서 찾는다. Codex 는 `~/.codex`, `~/.codex-profiles/*/home`, Orca 식
-`codex-accounts/*/home` 을, Claude 는 `~/.claude` 와 형제 격인 `~/.claude-*` 를 훑는다.
-다른 데 둔 홈은 설정 파일에 적어주면 되고, 그 외에 바꿀 건 없다.
+dipstick 은 이걸 알아서 찾는다. `~/.claude` 와 형제 격인 `~/.claude-*` 를 훑는다. 다른 데 둔
+홈은 설정 파일에 적어주면 되고, 그 외에 바꿀 건 없다.
 
 ```json
 { "claude_homes": ["~/work/claude-config"] }
@@ -97,12 +88,11 @@ dipstick 은 오케스트레이터가 없어도 돌아간다 — 그런데 이�
 맞물린다. 역할이 반대편이기 때문이다. 래퍼는 여러 계정으로 *발사하는* 쪽을, dipstick 은
 그 계정들을 *계량하는* 쪽을 맡는다.
 
-Orca 가 이 도구가 옆에서 만들어진 경우다. Orca 는 Codex 계정을 각자의 홈
-(`codex-accounts/*/home`)에, Claude 로그인을 자기 관리 keychain 항목에 두는데 — dipstick
-은 둘 다 알아서 읽는다. Orca 가 발사할 수 있는 계정은 설정 없이 전부 카드로 선다. 반대
-방향으로는 `$(dipstick --main-cmd)` 를 Orca 든 맨 셸이든 실행 명령 앞에 끼우면, 래퍼가
-계기가 여유 있다고 말한 계정으로 발사한다. 다른 래퍼도 같은 모양이다. `claude_homes` 나
-`~/.codex-profiles/*/home` 심볼릭 링크를 그 래퍼가 계정을 두는 곳으로 향하게 하면 된다.
+Orca 가 이 도구가 옆에서 만들어진 경우다. Orca 는 Codex 로그인을 자기 홈
+(`codex-accounts/*/home`)에, Claude 로그인을 자기 관리 keychain 항목에 두는데 — dipstick 은 둘 다
+알아서 읽는다. 반대 방향으로는 `$(dipstick --main-cmd)` 를 Orca 든 맨 셸이든 실행 명령 앞에
+끼우면, 래퍼가 계기가 여유 있다고 말한 계정으로 발사한다. 다른 래퍼도 같은 모양이다.
+`claude_homes` 를 그 래퍼가 계정을 두는 곳으로 향하게 하면 된다.
 
 ## 설치
 
@@ -283,7 +273,7 @@ dipstick 은 그 창들이 서로 얼마나 어긋나는지부터 재고 나서 
 {
   "reserve": { "Claude": 30 },
   "policy": {
-    "Codex Pro": ["2순위", "ProLite 가 부족할 때"]
+    "Claude Max": ["2순위", "마감 시에만"]
   },
   "imminent_minutes": 60
 }
@@ -325,11 +315,10 @@ dipstick --bar-window binds|5h|7d   # 메뉴바가 앞세울 창
 바로 비교된다. 그 길이의 창이 없는 구독(Codex 는 7일 창만 잰다)은 바에서 사라지는 대신
 자기 제약 창으로 돌아간다. 패널에도 같은 스위치가 있다.
 
-**Codex 는 계정 하나만 쓴다.** Codex 계정은 전부 읽어서 보여주지만, 발사는 지정한 계정
-하나로만 간다. 페이스가 다른 Codex 계정으로 일을 옮기지 않으므로, 소진되면 전환하지 않고
-멈춘다. Codex 가 메인이면 그 계정이 지정 계정이고, 아니면 `dipstick --set-codex KEY` 나 패널의
-*이 Codex 사용* 으로 정한다. 계정이 여럿인데 지정이 없으면 `--vendor codex` 는 답하지 않는다.
-MCP `can_i_start` 는 나머지를 `NOT_SELECTED` 로 답한다.
+**Codex 는 한 사람당 계정 하나다.** dipstick 은 그 계정 하나만 보여주고 그 계정으로만 발사한다.
+페이스가 일을 다른 데로 옮기지 않으므로 소진되면 멈춘다. 기계에 다른 Codex 로그인이 남아 있어도
+화면에서 빠진다. Codex 가 메인이면 그 계정이고, 아니면 `dipstick --set-codex KEY` 로 한 번 정한다.
+로그인이 여럿인데 지정이 없으면 고를 수 있게 전부 보여주고, `--vendor codex` 는 답하지 않는다.
 
 `--vendor` 는 **도구**를 고정한다. Codex 는 그 지정 계정으로 답하고, 다른 벤더는 계정이 선택을 따른다. 메인이 다른 벤더로
 고정돼 있어도 선택은 지정한 벤더 안에서 이뤄진다 — 사람이 친 쪽이 이긴다. 덕분에 그냥

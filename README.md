@@ -30,10 +30,9 @@ friends are optional, and dipstick composes with them if you already run one
 
 <img src="assets/screenshot.png" width="620" alt="Menu bar showing three subscriptions, with the panel open below it">
 
-Three subscriptions across three accounts, read at once: two Codex plans and a
-Claude Max, each with its own login. The bar carries one figure apiece; the
-panel opens on click with every window, the pace surplus, the reserve floor and
-which pool the next launch would ride.
+Each subscription read at once, each with its own login. The bar carries one
+figure apiece; the panel opens on click with every window, the pace surplus, the
+reserve floor, credits and which pool the next launch would ride.
 
 **It never sends a prompt to a model.** Asking a model "how much do I have left"
 would open a fresh rate-limit window — the opposite of what a gauge should do. So
@@ -70,20 +69,14 @@ Any one of them is enough.
 
 ## Several accounts of the same tool
 
-Two subscriptions of the same vendor is the case dipstick is really for — one
-gauge, both pools, and a launch that rides whichever has room. Neither CLI has a
-profile switcher; both keep everything under a home directory named by an
-environment variable, so a second account is a second directory.
+Two subscriptions of the same vendor share one gauge, and a launch rides
+whichever has room. Claude Code has no profile switcher; it keeps everything
+under a directory named by an environment variable, so a second account is a
+second directory. Codex is the exception: it is one account per person, so
+dipstick shows and launches on exactly one
+([below](#pace-and-how-the-launch-target-is-chosen)).
 
-**Codex** — `CODEX_HOME` holds the login, the config and the session rollouts:
-
-```sh
-mkdir -p ~/.codex-profiles/work/home
-CODEX_HOME=~/.codex-profiles/work/home codex login     # log in as the other account
-alias codex-work='CODEX_HOME=~/.codex-profiles/work/home codex'
-```
-
-**Claude Code** — `CLAUDE_CONFIG_DIR` does the same. The login does not live in
+**Claude Code** — `CLAUDE_CONFIG_DIR` names the directory. The login does not live in
 the directory but in the login keychain, under an entry named for it
 (`Claude Code-credentials-<first 8 hex of sha256 of the absolute path>`), so
 each config dir gets its own session rather than overwriting the last:
@@ -93,9 +86,7 @@ CLAUDE_CONFIG_DIR=~/.claude-work claude          # first run asks you to log in
 alias claude-work='CLAUDE_CONFIG_DIR=~/.claude-work claude'
 ```
 
-dipstick finds these on its own: `~/.codex`, `~/.codex-profiles/*/home` and
-Orca-style `codex-accounts/*/home` for Codex, `~/.claude` and any sibling
-`~/.claude-*` for Claude. A home kept somewhere else is named in the config
+dipstick finds these on its own: `~/.claude` and any sibling `~/.claude-*`. A home kept somewhere else is named in the config
 file, and nothing else changes:
 
 ```json
@@ -112,14 +103,12 @@ dipstick needs no orchestrator — but if you already run one, the two compose
 cleanly because they hold opposite ends of the job: the wrapper owns *launching*
 into many accounts, dipstick owns *metering* them.
 
-Orca is the case it was built alongside. Orca keeps each
-Codex account under its own home (`codex-accounts/*/home`) and its Claude login
-in a managed keychain entry — dipstick reads both automatically, so every
-account Orca can launch into shows up as a card with no configuration. In the
-other direction, `$(dipstick --main-cmd)` drops into any command Orca (or a
-plain shell) runs, so the wrapper launches into whichever account the gauge says
-has room. Same shape for any other wrapper: point `claude_homes` or a
-`~/.codex-profiles/*/home` symlink at wherever it keeps its accounts.
+Orca is the case it was built alongside. Orca keeps its Codex login under its
+own home (`codex-accounts/*/home`) and its Claude login in a managed keychain
+entry — dipstick reads both automatically. In the other direction,
+`$(dipstick --main-cmd)` drops into any command Orca (or a plain shell) runs, so
+the wrapper launches into whichever account the gauge says has room. Same shape
+for any other wrapper: point `claude_homes` at wherever it keeps its accounts.
 
 ## Install
 
@@ -317,7 +306,7 @@ Everything below is optional — `~/.config/dipstick/config.json`:
 {
   "reserve": { "Claude": 30 },
   "policy": {
-    "Codex Pro": ["2nd", "when the smaller plan runs short"]
+    "Claude Max": ["2nd", "deadlines only"]
   },
   "imminent_minutes": 60
 }
@@ -365,12 +354,12 @@ compare directly; a subscription that has no window of that length (Codex meters
 a 7-day window only) falls back to its constraining window rather than vanishing
 from the bar. The panel has the same control.
 
-**Codex takes one account.** Every Codex account is read and shown, but launches
-only ever use the one you chose: pace never moves work to another Codex account,
-so one that runs out stops rather than switches. A Codex main is that choice;
-otherwise set it with `dipstick --set-codex KEY` or *Use this Codex* in the panel.
-With several accounts and none chosen, `--vendor codex` refuses to answer. MCP
-`can_i_start` reports the others as `NOT_SELECTED`.
+**Codex is one account per person.** dipstick shows that one account and
+launches only on it; pace never moves work elsewhere, so an account that runs
+out stops. If the machine still holds other Codex logins they drop out of view.
+A Codex main is the account; otherwise set it once with
+`dipstick --set-codex KEY`. With several logins and none chosen, all are listed
+so one can be picked, and `--vendor codex` refuses to answer.
 
 `--vendor` pins the **tool**. For Codex the answer is that one account; for
 others the account still follows the pick. If the main is pinned to a different

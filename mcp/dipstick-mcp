@@ -185,7 +185,7 @@ def tool_can_i_start(args):
             verdicts.append({
                 "subscription": s.get("sub"),
                 "verdict": "NOT_SELECTED",
-                "detail": "read for display only — launches use the one chosen Codex account",
+                "detail": "no Codex account chosen yet, or not the chosen one — launches use one account",
             })
             continue
         if not wins:

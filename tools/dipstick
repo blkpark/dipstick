@@ -1833,10 +1833,21 @@ def live_codex():
     return counts
 
 
-def collect(db):
+def one_codex(db, rows):
+    """Codex is one account per person, so only that account is shown. Other
+    logins left on the machine drop out; with none chosen they all stay, because
+    that is where the choice is made."""
+    chosen = codex_selected(db, rows)
+    return [r for r in rows if not r["sub"].startswith("Codex") or not chosen
+            or r["sub"] == chosen]
+
+
+def collect(db, every_codex=False):
     consumers = live_codex()
     rows = (codex_rows(db, sum(consumers.values())) + claude_rows(db)
             + agy_rows(db) + zcode_rows() + opencode_rows(db))
+    if not every_codex:
+        rows = one_codex(db, rows)
     record_samples(db, rows)
     try:
         ingest_tokens(db)
@@ -1913,9 +1924,9 @@ VENDOR_PREFIX = {"codex": "Codex", "claude": "Claude", "agy": "Antigravity",
 def codex_selected(db, rows):
     """The one Codex account launches may use, or None when none is chosen.
 
-    Several Codex accounts can be read, but only one is ever launched on: pace
-    must not move work to another account when this one runs short. An
-    exhausted account stops and is reported; changing it is a human decision.
+    Codex is one account per person. A machine can still hold other logins, but
+    pace must not move work onto them when this one runs short: an exhausted
+    account stops and is reported, and changing it is a human decision.
     The stored choice wins, then a Codex main, then a lone account.
     """
     subs = sorted({r["sub"] for r in rows if r["sub"].startswith("Codex")})
@@ -1985,7 +1996,7 @@ def pick_launch(db, rows, vendor=None):
         if sub.startswith("OpenCode"):
             continue              # usage display, never dispatch capacity
         if sub.startswith("Codex") and sub != codex:
-            continue              # read for display; only one takes launches
+            continue              # another login on this machine, not in use
         if sub.startswith("Antigravity") and prefix != "Antigravity":
             # Out of the anonymous pick -- agy is role-fixed (research), so
             # @main never rides it. Asking for it by name (--vendor agy) is the
@@ -2823,7 +2834,7 @@ def main(argv):
         if "--set-codex" in args:
             i = args.index("--set-codex")
             key = args[i + 1] if len(args) > i + 1 else ""
-            rows, _ = collect(db)
+            rows, _ = collect(db, every_codex=True)
             subs = sorted({r["sub"] for r in rows if r["sub"].startswith("Codex")})
             hit = next((s for s in subs if sub_key(s) == key), None)
             if not hit:

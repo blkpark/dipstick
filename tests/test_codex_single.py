@@ -49,4 +49,10 @@ assert dip.pick_launch(db, rows, "codex")[0] == "Codex Pro"
 
 # One account needs no choosing.
 assert dip.codex_selected(db, rows[:1]) == "Codex ProLite"
+# Only the chosen account is shown; with none chosen all stay, to choose from.
+assert [r["sub"] for r in dip.one_codex(db, rows)] == ["Codex Pro", "Claude Max"]
+dip.set_setting(db, "codex_account", "")
+dip.set_setting(db, "main", "Claude Max")
+assert len(dip.one_codex(db, rows)) == 3
+
 print("ok")
