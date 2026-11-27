@@ -402,9 +402,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let snap = snapshot else {
             button.image = nil
             button.title = "dipstick ?"
-            button.toolTip = CLI.path == nil
-                ? "dipstick CLI not found in ~/.local/bin or Homebrew"
-                : "Could not read a snapshot"
+            // No tooltip: the panel says why. A status-item tooltip that is
+            // rewritten while the bar refreshes can detach and drift across the
+            // screen on recent macOS without the item ever being hovered.
+            button.toolTip = nil
             return
         }
         let bar = snap.barWindow
@@ -412,9 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.title = ""
         button.image = renderStatus(ordered, pinned: snap.mainMode == "pinned",
                                     prefer: bar, appearance: button.effectiveAppearance)
-        button.toolTip = ordered.compactMap { sub in
-            bindingWindow(sub, prefer: bar).map { "\(sub.sub) · \($0.name) \(Int($0.remaining.rounded()))% · \($0.why)" }
-        }.joined(separator: "\n")
+        button.toolTip = nil      // the click panel carries the detail; see above
     }
 
     // MARK: menu actions
