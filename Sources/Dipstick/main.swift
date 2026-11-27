@@ -45,6 +45,7 @@ struct Subscription: Decodable {
 struct Credits: Decodable {
     let enabled: Bool
     let text: String?
+    let remaining: Double?
 }
 
 struct Reserve: Decodable {
@@ -91,6 +92,13 @@ func shortName(_ sub: String) -> String {
 /// label colour, which macOS flips for a light or dark menu bar, and the state
 /// rides on a small filled dot instead. Drawing to an image rather than hosting a
 /// custom view keeps the normal button behaviour: one click still opens the menu.
+/// "/12344" after the figure when the subscription holds spendable credits.
+/// Display only -- credits never enter the pick.
+func creditSuffix(_ sub: Subscription) -> String {
+    guard let c = sub.credits, c.enabled, let left = c.remaining, left >= 1 else { return "" }
+    return "/\(Int(left))"
+}
+
 func renderStatus(_ subs: [Subscription], pinned: Bool, prefer: String?, appearance: NSAppearance?) -> NSImage {
     // Three variants rendered side by side against the system readouts settled
     // this: the plain sans at semibold matches them exactly, where SF Mono's
@@ -99,8 +107,8 @@ func renderStatus(_ subs: [Subscription], pinned: Bool, prefer: String?, appeara
     // values change.
     // Matched to the neighbouring system-monitor items (CPU/RAM): a light
     // small label over a medium figure. Semibold read noticeably heavier.
-    let nameFont = NSFont.systemFont(ofSize: 8.5, weight: .regular)
-    let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)
+    let nameFont = NSFont.systemFont(ofSize: 8.5, weight: .light)
+    let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .regular)
     let gap: CGFloat = 7, height: CGFloat = 22
 
     let pinFont = NSFont.systemFont(ofSize: 7.5, weight: .bold)
@@ -138,7 +146,7 @@ func renderStatus(_ subs: [Subscription], pinned: Bool, prefer: String?, appeara
         let alarming = ["LOW", "BLOCKED"].contains(win.state)
         let tint = alarming ? colour(for: win.state) : NSColor.labelColor
         let value = NSAttributedString(
-            string: "\(Int(win.remaining.rounded()))%",
+            string: "\(Int(win.remaining.rounded()))%" + creditSuffix(sub),
             attributes: [.font: valueFont, .foregroundColor: tint])
         let nameBlock = name.size().width
             + (pin.map { $0.size().width + pinPadX * 2 + pinGap } ?? 0)
