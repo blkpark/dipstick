@@ -96,7 +96,18 @@ func shortName(_ sub: String) -> String {
 /// Display only -- credits never enter the pick.
 func creditSuffix(_ sub: Subscription) -> String {
     guard let c = sub.credits, c.enabled, let left = c.remaining, left >= 1 else { return "" }
-    return "/\(Int(left))"
+    return "/" + compactCount(left)
+}
+
+/// 36411 -> "36k", 1250 -> "1.2k", 999 -> "999". Rounded down, so the bar never
+/// shows more than is left.
+func compactCount(_ v: Double) -> String {
+    for (div, unit) in [(1e6, "M"), (1e3, "k")] where v >= div {
+        let x = v / div
+        return x < 10 ? String(format: "%.1f", (x * 10).rounded(.down) / 10) + unit
+                      : "\(Int(x.rounded(.down)))" + unit
+    }
+    return "\(Int(v.rounded(.down)))"
 }
 
 func renderStatus(_ subs: [Subscription], pinned: Bool, prefer: String?, appearance: NSAppearance?) -> NSImage {
