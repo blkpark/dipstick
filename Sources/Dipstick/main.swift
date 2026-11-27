@@ -97,8 +97,10 @@ func renderStatus(_ subs: [Subscription], pinned: Bool, prefer: String?, appeara
     // mechanical glyphs read as heavier than they are and a condensed regular
     // label washes out. Digits stay monospaced so the figures do not twitch as
     // values change.
-    let nameFont = NSFont.systemFont(ofSize: 9, weight: .semibold)
-    let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+    // Matched to the neighbouring system-monitor items (CPU/RAM): a light
+    // small label over a medium figure. Semibold read noticeably heavier.
+    let nameFont = NSFont.systemFont(ofSize: 8.5, weight: .regular)
+    let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)
     let gap: CGFloat = 7, height: CGFloat = 22
 
     let pinFont = NSFont.systemFont(ofSize: 7.5, weight: .bold)

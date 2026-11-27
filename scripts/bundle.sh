@@ -31,8 +31,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>Dipstick</string>
   <key>CFBundleIconFile</key><string>Dipstick</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.11.1</string>
-  <key>CFBundleVersion</key><string>27</string>
+  <key>CFBundleShortVersionString</key><string>0.11.2</string>
+  <key>CFBundleVersion</key><string>28</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <!-- menu bar only: no Dock icon, no app switcher entry -->
   <key>LSUIElement</key><true/>
